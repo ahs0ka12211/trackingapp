@@ -7,6 +7,7 @@
 #include <QSlider>
 #include <QTimer>
 #include <opencv2/opencv.hpp>
+#include "Tracker.h"
 
 class MainWindow : public QMainWindow
 {
@@ -25,13 +26,17 @@ private slots:
 private:
     QPushButton *btnOpen;
     QPushButton *btnPause;
-    QLabel *videoLabel;
-    QSlider *videoSlider;
-    QTimer *timer;
+    QLabel      *videoLabel;
+    QSlider     *videoSlider;
+    QTimer      *timer;
+
     cv::VideoCapture cap;
     double totalFrames = 0;
-    double fps = 30;
-    bool isSliderUpdating = false;
+    double fps         = 30;
+    bool   isSliderUpdating = false;
+
+    // Трекер — создаётся при открытии видео
+    Tracker *tracker = nullptr;
 };
 
 #endif // MAINWINDOW_H
