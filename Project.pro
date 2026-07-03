@@ -38,4 +38,5 @@ LIBS += -L$$OPENCV_DIR/lib \
         -lopencv_features2d455 \
         -lopencv_objdetect455 \
         -lopencv_ml455        \
-        -lopencv_video455
+        -lopencv_video455 \
+         -lopencv_calib3d455

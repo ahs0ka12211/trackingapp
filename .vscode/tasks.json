@@ -24,13 +24,31 @@
             }
         },
         {
+            "label": "Run make debug",
+            "type": "shell",
+            "command": "mingw32-make debug", // или jom/nmake
+            "options": {
+                "cwd": "build/Desktop_Qt_6_11_1_MinGW_64_bit"
+            }
+        },
+        {
             "label": "Build",
-            "dependsOn": ["Create build dir", "Run qmake", "Run make"],
+            "dependsOn": ["Create build dir", "Run qmake", "Run make", "Run make debug"],
             "dependsOrder": "sequence",
             "group": {
                 "kind": "build",
                 "isDefault": true // чтобы собирать по Ctrl+Shift+B
             }
+        },
+        {
+            "label": "Run Project debug",
+            "type": "shell",
+            "command": "${workspaceFolder}/build/Desktop_Qt_6_11_1_MinGW_64_bit/debug/Project.exe",
+            "options": {
+                "cwd": "${workspaceFolder}/build/Desktop_Qt_6_11_1_MinGW_64_bit/debug"
+            },
+            "group": "none",
+            "problemMatcher": []
         },
         {
             "label": "Run Project",

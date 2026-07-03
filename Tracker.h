@@ -1,24 +1,22 @@
 #pragma once
 #include <opencv2/opencv.hpp>
-// Только базовый OpenCV — opencv_contrib не нужен
 
 class Tracker
 {
 public:
-    static constexpr int    DETECTION_FRAMES = 10;
-    static constexpr double MIN_CONTOUR_AREA = 500.0;
+    static constexpr int    DETECTION_FRAMES   = 10;
+    static constexpr double MIN_CONTOUR_AREA   = 500.0;
+    static constexpr int    CAMSHIFT_ITERATIONS = 10;
+    static constexpr double CAMSHIFT_EPSILON   = 1.0;
 
-    // Параметры CamShift
-    static constexpr int CAMSHIFT_ITERATIONS = 10;
-    static constexpr double CAMSHIFT_EPSILON = 1.0;
+    // Во сколько раз новый объект должен быть "активнее" текущего,
+    // чтобы трекер переключился на него
+    static constexpr double SWITCH_RATIO = 2.0;
 
     explicit Tracker(cv::VideoCapture& cap);
     ~Tracker() = default;
 
-    // Вызывается на каждом кадре. true = объект найден/отслеживается.
     bool findObject(const cv::Mat& frame);
-
-    // Сброс (новое видео или перемотка)
     void reset();
 
     bool isInitialized() const { return _initialized; }
@@ -31,17 +29,23 @@ private:
     bool detectPhase(const cv::Mat& frame);
     bool trackPhase(const cv::Mat& frame);
 
-    cv::Rect largestContourRect(const cv::Mat& mask) const;
+    // Возвращает самый крупный контур на маске и его площадь
+    cv::Rect largestContourRect(const cv::Mat& mask,
+                                double* outArea = nullptr) const;
 
-    // Строим HSV-гистограмму объекта из начального bbox
-    void buildHistogram(const cv::Mat& frame, const cv::Rect& roi);
+    void    buildHistogram(const cv::Mat& frame, const cv::Rect& roi);
+    cv::Mat stabilizeFrame(const cv::Mat& frame);
+
+    // Получаем маску движения для текущего кадра (стабилизированного)
+    cv::Mat getMotionMask(const cv::Mat& stabilized, bool forTracking);
 
     cv::VideoCapture& _cap;
 
-    // MOG2 для фазы детекции
-    cv::Ptr<cv::BackgroundSubtractorMOG2> _mog2;
+    // MOG2 используется и в детекции, и в трекинге (параллельно)
+    cv::Ptr<cv::BackgroundSubtractorMOG2> _mog2;        // для детекции
+    cv::Ptr<cv::BackgroundSubtractorMOG2> _mog2tracking; // для мониторинга во время трекинга
 
-    // Гистограмма HSV объекта (для CamShift)
+    cv::Mat _prevGray;
     cv::Mat _hist;
 
     int     _detectionCount  = 0;
