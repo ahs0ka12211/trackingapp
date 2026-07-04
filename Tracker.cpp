@@ -1,31 +1,24 @@
 #include "Tracker.h"
+#include <queue>
 
 Claster::Claster() 
 {
     R=0;G=0;B=0;left=0;right=0;up=0;down=0;
 }
 
-Tracker::Tracker() : gridEven(), gridUnEven()
-{ step = 10; N = 1;}
-
-Tracker::~Tracker()
-{
-
-    //TODO очищать массивы все
-};
-
-#include <queue>
+Tracker::Tracker() : _gridEven(), _gridUnEven()
+{ step = 5; N = 1;}
 
 void Tracker::getFrame(cv::Mat frame){
     std::vector<std::array<int, 5>>* gridCur;
     std::vector<Claster>* clasters;
     if(N % 2 == 1){  // нечетный кадр
-        gridCur = &gridUnEven;
-        clasters = &clastersEven;
+        gridCur = &_gridUnEven;
+        clasters = &_clastersEven;
     }
     else {
-        gridCur = &gridEven;
-        clasters = &clastersUnEven;
+        gridCur = &_gridEven;
+        clasters = &_clastersUnEven;
     }
     gridCur->clear();
     clasters->clear();
@@ -35,9 +28,14 @@ void Tracker::getFrame(cv::Mat frame){
 
     // ==========================================================
     // Проход 1: просто сэмплируем сетку, без кластеризации.
-    // gridIndex[gy*cols+gx] -> индекс точки в gridCur
+    // _gridIndexBuf[gy*cols+gx] -> индекс точки в gridCur
     // ==========================================================
-    std::vector<int> gridIndex(static_cast<size_t>(rows) * cols, -1);
+    size_t gridSize = static_cast<size_t>(rows) * cols;
+    if (_gridIndexBuf.size() != gridSize)
+        _gridIndexBuf.resize(gridSize);
+    std::fill(_gridIndexBuf.begin(), _gridIndexBuf.end(), -1);
+
+    _bfsQueue.resize(static_cast<size_t>(rows) * cols); // с запасом, максимум - все ячейки
 
     for (int y = 0, gy = 0; y < frame.size().height; y += step, gy++)
     {
@@ -47,15 +45,17 @@ void Tracker::getFrame(cv::Mat frame){
             int G = (int)row[x][1];
             int B = (int)row[x][0];
             gridCur->push_back(std::array<int, 5>{x, y, R, G, B});
-            gridIndex[gy * cols + gx] = static_cast<int>(gridCur->size() - 1);
+            _gridIndexBuf[gy * cols + gx] = static_cast<int>(gridCur->size() - 1);
         }
     }
 
     // ==========================================================
     // Проход 2: BFS по сетке (connected components)
     // ==========================================================
-    std::vector<char> visited(static_cast<size_t>(rows) * cols, 0);
-    std::queue<std::pair<int,int>> q;
+    if (_visitedBuf.size() != gridSize)
+        _visitedBuf.resize(gridSize);
+    std::fill(_visitedBuf.begin(), _visitedBuf.end(), false);
+    int qHead = 0, qTail = 0;
 
     // 8-связность (диагонали тоже считаем соседями).
     // Если нужна строгая 4-связность - оставь только первые 4 пары.
@@ -65,10 +65,10 @@ void Tracker::getFrame(cv::Mat frame){
     for (int gy = 0; gy < rows; gy++) {
         for (int gx = 0; gx < cols; gx++) {
             size_t flat = static_cast<size_t>(gy) * cols + gx;
-            if (visited[flat]) continue;
-            visited[flat] = 1;
+            if (_visitedBuf[flat]) continue;
+            _visitedBuf[flat] = true;
 
-            int seedIdx = gridIndex[flat];
+            int seedIdx = _gridIndexBuf[flat];
             const auto& seedPoint = (*gridCur)[seedIdx];
 
             // ЯКОРНЫЙ цвет кластера - фиксируем раз и навсегда.
@@ -87,11 +87,12 @@ void Tracker::getFrame(cv::Mat frame){
             newCl.down  = seedPoint[1];
             newCl.gridPoints.push_back(seedIdx);
 
-            q.push({gx, gy});
+            _bfsQueue[qTail++] = static_cast<int>(flat);
 
-            while (!q.empty()) {
-                auto [cx, cy] = q.front();
-                q.pop();
+            while (qHead < qTail) {
+                int curFlat = _bfsQueue[qHead++];
+                int cx = curFlat % cols;
+                int cy = curFlat / cols;
 
                 for (int d = 0; d < 8; d++) {
                     int nx = cx + dx[d];
@@ -99,16 +100,16 @@ void Tracker::getFrame(cv::Mat frame){
                     if (nx < 0 || nx >= cols || ny < 0 || ny >= rows) continue;
 
                     size_t nFlat = static_cast<size_t>(ny) * cols + nx;
-                    if (visited[nFlat]) continue;
+                    if (_visitedBuf[nFlat]) continue;
 
-                    int pointIdx = gridIndex[nFlat];
+                    int pointIdx = _gridIndexBuf[nFlat];
                     const auto& p = (*gridCur)[pointIdx];
                     int R = p[2], G = p[3], B = p[4];
 
                     // Сравниваем с ЯКОРЕМ кластера, а не с текущим соседом -
                     // именно это убирает "уплывающий цвет".
                     if (abs(R - anchorR) < 30 && abs(G - anchorG) < 30 && abs(B - anchorB) < 30) {
-                        visited[nFlat] = 1;
+                        _visitedBuf[nFlat] = true;
                         newCl.gridPoints.push_back(pointIdx);
 
                         int px = p[0], py = p[1];
@@ -117,7 +118,7 @@ void Tracker::getFrame(cv::Mat frame){
                         if (py < newCl.up)    newCl.up    = py;
                         if (py > newCl.down)  newCl.down  = py;
 
-                        q.push({nx, ny});
+                        _bfsQueue[qTail++] = static_cast<int>(nFlat);
                     }
                 }
             }
@@ -138,16 +139,16 @@ void Tracker::getFrame(cv::Mat frame){
     static int debugCounter = 0;
     debugCounter++;
     if (debugCounter % 1 == 0) {
-        DebugShowClusters(frame);
+        debugShowClusters(frame);
     }
 
     if(gridCur->size() > 0)
-        FindObject();
+        findObject();
 }
 
-void Tracker::FindObject(){}
+void Tracker::findObject(){}
 
-void Tracker::DebugShowClusters(cv::Mat frame){
+void Tracker::debugShowClusters(cv::Mat frame){
     // ==========================================
     // 1. Берем текущие кластеры
     // ==========================================
@@ -155,11 +156,11 @@ void Tracker::DebugShowClusters(cv::Mat frame){
     std::vector<std::array<int, 5>>* grid;
     
     if (N % 2 == 1) {
-        clasters = &clastersEven;
-        grid = &gridUnEven;
+        clasters = &_clastersEven;
+        grid = &_gridUnEven;
     } else {
-        clasters = &clastersUnEven;
-        grid = &gridEven;
+        clasters = &_clastersUnEven;
+        grid = &_gridEven;
     }
     
     if (clasters->empty()) {

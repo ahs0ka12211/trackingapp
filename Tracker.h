@@ -31,24 +31,29 @@ class Tracker : public QObject
     Q_OBJECT
 
 private:
-    std::vector<std::array<int, 5>> gridEven; // [x, y, R, G, B]  
-    std::vector<std::array<int, 5>> gridUnEven;
+    std::vector<std::array<int, 5>> _gridEven; // [x, y, R, G, B]  
+    std::vector<std::array<int, 5>> _gridUnEven;
 
-    std::vector<Claster> clastersEven; // кластеры объектов на кадре [средний цвет, крайняя левая, правая, верхняя, нижняя координаты]
-    std::vector<Claster> clastersUnEven;
+    std::vector<Claster> _clastersEven; // кластеры объектов на кадре [средний цвет, крайняя левая, правая, верхняя, нижняя координаты]
+    std::vector<Claster> _clastersUnEven;
+
+    std::vector<int> _bfsQueue; // хранит "плоские" индексы ячеек
+
+    std::vector<int> _gridIndexBuf;
+    std::vector<bool> _visitedBuf;
 
     int step; // шаг с которым строится сетка особых точек
     int N; // номер кадра 
 
-    cv::VideoCapture* video;
+    cv::VideoCapture* _video;
 
 
 public:
     Tracker();    
 
-    ~Tracker();
+    ~Tracker() = default;
 
-    void DebugShowClusters(cv::Mat frame);
+    void debugShowClusters(cv::Mat frame);
 
     void drawCluster(cv::Mat& overlay, 
                           const Claster& cl, 
@@ -56,11 +61,9 @@ public:
                           cv::Scalar color,
                           int index);
 
-    void FindObject();
+    void findObject();
 
 public slots:
     void getFrame(cv::Mat frame);
 };
- 
- 
 #endif // TRACKER_HPP

@@ -37,7 +37,7 @@ MainWindow::MainWindow(QWidget *parent)
     videoLabel = new QLabel(this);
     videoLabel->setAlignment(Qt::AlignCenter);
     videoLabel->setMinimumSize(640, 480);
-    videoLabel->setStyleSheet("background-color: white;");
+    videoLabel->setStyleSheet("background-color: black;");
     layout->addWidget(videoLabel);
 
     // ---- СЛАЙДЕР ----
