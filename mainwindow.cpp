@@ -7,6 +7,24 @@
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
 {
+
+    // 1. Создаем трекер в отдельном потоке
+    trackerThread = new QThread(this);
+    tracker = new Tracker();
+    tracker->moveToThread(trackerThread);
+    
+    /*
+    // 2. Подключаем сигналы от трекера к слотам MainWindow
+    connect(tracker, &Tracker::objectFound, 
+            this, &MainWindow::onObjectFound);
+    connect(tracker, &Tracker::objectLost, 
+            this, &MainWindow::onObjectLost);
+    */
+    
+    // 3. Запускаем поток трекера
+    trackerThread->start();
+
+    std::cout << "helo";
     // Виджет и layout
     QWidget *central = new QWidget(this);
     QVBoxLayout *layout = new QVBoxLayout(central);
@@ -40,6 +58,11 @@ MainWindow::MainWindow(QWidget *parent)
     btnPause = new QPushButton("Пауза/Стоп", this);
     layout->addWidget(btnPause);
 
+    // Кнопка запуска трекера
+    btnStartTracker = new QPushButton("Запустить трекер", this);
+    layout->addWidget(btnStartTracker);
+
+
     setCentralWidget(central);
 
     // Таймер для обновления кадров
@@ -47,6 +70,7 @@ MainWindow::MainWindow(QWidget *parent)
     connect(timer, &QTimer::timeout, this, &MainWindow::updateFrame);
     connect(btnOpen, &QPushButton::clicked, this, &MainWindow::openVideo);
     connect(btnPause, &QPushButton::clicked, this, &MainWindow::PauseVideo);
+    connect(btnStartTracker, &QPushButton::clicked, this, &MainWindow::StartTracker);
     connect(videoSlider, &QSlider::sliderMoved, this, &MainWindow::onSliderMoved);
 }
 
@@ -89,7 +113,7 @@ void MainWindow::openVideo()
     totalFrames = cap.get(cv::CAP_PROP_FRAME_COUNT);
 
     qDebug() << "FPS:" << fps;
-    qDebug() << "Всего кадров:" << totalFrames;
+    qDebug() << "Frame count:" << totalFrames;
 
     if (fps <= 0) fps = 30;
 
@@ -119,9 +143,15 @@ void MainWindow::updateFrame()
     cv::Mat frame;
     cap >> frame;
 
+
+    if(isTracking == true){
+        cv::Mat frameCopy = frame.clone(); // Копируем, т.к. frame перезапишется
+        QMetaObject::invokeMethod(tracker, "getFrame", 
+                                  Qt::QueuedConnection,
+                                  Q_ARG(cv::Mat, frameCopy));
+    }
     if (frame.empty()) {
         timer->stop();
-        qDebug() << "Видео закончилось";
         return;
     }
 
@@ -132,12 +162,14 @@ void MainWindow::updateFrame()
     isSliderUpdating = false;
 
     // Рисуем желтый прямоугольник
+    /*
     cv::rectangle(frame,
                   cv::Point(100, 100),
                   cv::Point(300, 250),
                   cv::Scalar(0, 255, 255),
                   2
                   );
+    */
 
     // Конвертируем и показываем
     cv::cvtColor(frame, frame, cv::COLOR_BGR2RGB);
@@ -158,4 +190,9 @@ void MainWindow::onSliderMoved(int value)
 
     // Показываем текущий кадр
     updateFrame();
+}
+
+void MainWindow::StartTracker()
+{
+    isTracking = true;
 }
