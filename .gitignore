@@ -30,6 +30,7 @@ ui_*.h
 # VSCode
 .vscode/
 *.code-workspace
+*.json
 
 # Compiled output
 *.out
