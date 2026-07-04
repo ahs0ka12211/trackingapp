@@ -1,5 +1,4 @@
 #include "Tracker.h"
-#include <queue>
 
 Claster::Claster() 
 {
