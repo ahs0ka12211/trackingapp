@@ -28,6 +28,7 @@ void Tracker::reset()
     _detecting       = true;
     _initialized     = false;
     _bbox            = cv::Rect();
+    _smoothedBbox    = cv::Rect();
     _start           = cv::Point();
     _end             = cv::Point();
 }
@@ -39,15 +40,26 @@ void Tracker::reset()
 
 cv::Mat Tracker::getMotionMask(const cv::Mat& stabilized, bool forTracking)
 {
+    // Уменьшаем до HD если кадр больше
+    cv::Mat input = stabilized;
+    double scale = 1.0;
+    if (stabilized.cols > 1280) {
+        scale = 1280.0 / stabilized.cols;
+        cv::resize(stabilized, input, cv::Size(), scale, scale);
+    }
+
     cv::Mat mask;
     if (forTracking)
-        _mog2tracking->apply(stabilized, mask);
+        _mog2tracking->apply(input, mask);
     else
-        _mog2->apply(stabilized, mask);
+        _mog2->apply(input, mask);
 
-    cv::Mat kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(5, 5));
-    cv::morphologyEx(mask, mask, cv::MORPH_OPEN,  kernel);
-    cv::morphologyEx(mask, mask, cv::MORPH_CLOSE, kernel);
+    cv::Mat kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(3, 3));
+    cv::morphologyEx(mask, mask, cv::MORPH_OPEN, kernel);
+
+    // Масштабируем маску обратно если уменьшали
+    if (scale < 1.0)
+        cv::resize(mask, mask, stabilized.size(), 0, 0, cv::INTER_NEAREST);
 
     return mask;
 }
@@ -99,19 +111,30 @@ bool Tracker::detectPhase(const cv::Mat& frame)
 
 bool Tracker::trackPhase(const cv::Mat& frame)
 {
-    // ── Шаг 1: CamShift обновляет текущий bbox ───────────────
+    cv::Mat stabilized = stabilizeFrame(frame);
+    cv::Mat motionMask = getMotionMask(stabilized, true);
+
+    // ── Шаг 1: CamShift ──────────────────────────────────────
     cv::Mat hsv;
-    cv::cvtColor(frame, hsv, cv::COLOR_BGR2HSV);
+    cv::cvtColor(stabilized, hsv, cv::COLOR_BGR2HSV);
 
     cv::Mat rangeMask;
-    cv::inRange(hsv, cv::Scalar(0, 30, 30), cv::Scalar(180, 255, 255), rangeMask);
+    cv::inRange(hsv, cv::Scalar(0, 15, 15), cv::Scalar(180, 255, 255), rangeMask);
 
     cv::Mat backProj;
-    int         channels[] = {0};
-    float       hRange[]   = {0, 180};
-    const float* ranges[]  = {hRange};
+    int    channels[]     = {0, 1};
+    float  hRange[]       = {0, 180};
+    float  sRange[]       = {0, 256};
+    const float* ranges[] = {hRange, sRange};
     cv::calcBackProject(&hsv, 1, channels, _hist, backProj, ranges);
     cv::bitwise_and(backProj, rangeMask, backProj);
+
+    // Для CamShift — расширенная маска (отдельная копия)
+    cv::Mat dilatedMotion;
+    cv::Mat dilateKernel = cv::getStructuringElement(
+        cv::MORPH_ELLIPSE, cv::Size(15, 15));
+    cv::dilate(motionMask, dilatedMotion, dilateKernel);
+    cv::bitwise_and(backProj, dilatedMotion, backProj);
 
     cv::TermCriteria termCrit(
         cv::TermCriteria::EPS | cv::TermCriteria::COUNT,
@@ -130,38 +153,40 @@ bool Tracker::trackPhase(const cv::Mat& frame)
         return false;
     }
 
-    // ── Шаг 2: параллельно гоним MOG2, ищем более активный объект ──
-    cv::Mat stabilized = stabilizeFrame(frame);
-    cv::Mat motionMask = getMotionMask(stabilized, true);
+    // ── Сглаживание bbox — убирает дребезг ───────────────────
+    // EMA (exponential moving average): новый bbox = 0.7*старый + 0.3*новый
+    // Чем ближе alpha к 1.0 — тем инертнее (меньше дребезга, но медленнее реакция)
+    const double alpha = 0.7;
+    if (!_smoothedBbox.empty()) {
+        _smoothedBbox.x      = alpha * _smoothedBbox.x      + (1-alpha) * _bbox.x;
+        _smoothedBbox.y      = alpha * _smoothedBbox.y      + (1-alpha) * _bbox.y;
+        _smoothedBbox.width  = alpha * _smoothedBbox.width  + (1-alpha) * _bbox.width;
+        _smoothedBbox.height = alpha * _smoothedBbox.height + (1-alpha) * _bbox.height;
+    } else {
+        _smoothedBbox = _bbox;
+    }
 
-    // Считаем площадь движения внутри текущего bbox
-    cv::Mat currentRegion = motionMask(_bbox & frameRect);
-    double currentMotion = (double)cv::countNonZero(currentRegion) / (_bbox.area() + 1);
+    // ── Шаг 2: поиск кандидата на оригинальной маске (без дилатации)
+    cv::Mat currentRegion   = motionMask(_bbox & frameRect);
+    double  candidateArea   = 0;
+    cv::Rect candidateRect  = largestContourRect(motionMask, &candidateArea);
+    double candidateDensity = candidateArea / (candidateRect.area() + 1);
+    double currentDensity   = (double)cv::countNonZero(currentRegion)
+                              / (_bbox.area() + 1);
 
-    // Ищем самый крупный движущийся объект во всём кадре
-    double    candidateArea    = 0;
-    cv::Rect  candidateRect    = largestContourRect(motionMask, &candidateArea);
-    double    candidateDensity = candidateArea / (candidateRect.area() + 1);
-    double    currentDensity   = (double)cv::countNonZero(currentRegion) / (_bbox.area() + 1);
-
-    // Проверяем: кандидат существует, не совпадает с текущим объектом
-    // и активнее текущего в SWITCH_RATIO раз
-    bool isNewObject   = !candidateRect.empty();
-    bool notOverlapping = (candidateRect & _bbox).area() < candidateRect.area() * 0.3;
-    bool isMoreActive = candidateDensity > currentDensity * SWITCH_RATIO;
+    bool isNewObject    = !candidateRect.empty();
+    bool notOverlapping = (candidateRect & _bbox).area()
+                          < candidateRect.area() * 0.3;
+    bool isMoreActive   = candidateDensity > currentDensity * SWITCH_RATIO;
 
     if (isNewObject && notOverlapping && isMoreActive) {
-        qDebug() << "[Tracker] обнаружен более активный объект, переключаемся"
-                 << "| старый:" << currentMotion
-                 << "| новый:"  << candidateArea;
-
-        // Переключаемся: перестраиваем гистограмму под новый объект
-        _bbox = candidateRect;
+        _bbox         = candidateRect;
+        _smoothedBbox = candidateRect; // сброс сглаживания при переключении
         buildHistogram(frame, _bbox);
     }
 
-    _start = _bbox.tl();
-    _end   = _bbox.br();
+    _start = _smoothedBbox.tl();
+    _end   = _smoothedBbox.br();
     return true;
 }
 
@@ -173,18 +198,19 @@ void Tracker::buildHistogram(const cv::Mat& frame, const cv::Rect& roi)
 {
     cv::Mat hsv;
     cv::cvtColor(frame, hsv, cv::COLOR_BGR2HSV);
-
     cv::Mat roiHsv = hsv(roi);
 
     cv::Mat mask;
-    cv::inRange(roiHsv, cv::Scalar(0, 30, 30), cv::Scalar(180, 255, 255), mask);
+    cv::inRange(roiHsv, cv::Scalar(0, 15, 15), cv::Scalar(180, 255, 255), mask);
 
-    int         histSize   = 64;
-    float       hRange[]   = {0, 180};
-    const float* ranges[]  = {hRange};
-    int         channels[] = {0};
+    // 2D гистограмма: H (64 бина) × S (64 бина)
+    int    histSize[]  = {64, 64};
+    float  hRange[]    = {0, 180};
+    float  sRange[]    = {0, 256};
+    const float* ranges[] = {hRange, sRange};
+    int    channels[]  = {0, 1}; // H и S каналы
 
-    cv::calcHist(&roiHsv, 1, channels, mask, _hist, 1, &histSize, ranges);
+    cv::calcHist(&roiHsv, 1, channels, mask, _hist, 2, histSize, ranges);
     cv::normalize(_hist, _hist, 0, 255, cv::NORM_MINMAX);
 }
 
@@ -197,13 +223,19 @@ cv::Mat Tracker::stabilizeFrame(const cv::Mat& frame)
     cv::Mat gray;
     cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);
 
+     if (frame.cols > 1280) {
+        double scale = 1280.0 / frame.cols;
+        cv::resize(gray, gray, cv::Size(), scale, scale);
+    }
+    
+
     if (_prevGray.empty()) {
         _prevGray = gray.clone();
         return frame;
     }
 
     std::vector<cv::Point2f> prevPts, currPts;
-    cv::goodFeaturesToTrack(_prevGray, prevPts, 200, 0.01, 30);
+    cv::goodFeaturesToTrack(_prevGray, prevPts, 100, 0.01, 30);
 
     if (prevPts.empty()) {
         _prevGray = gray.clone();
@@ -259,13 +291,19 @@ cv::Rect Tracker::largestContourRect(const cv::Mat& mask, double* outArea) const
 
     for (const auto& c : contours) {
         double area = cv::contourArea(c);
-
-        // Игнорируем контуры больше 40% кадра — это шум/фон, не объект
         if (area > frameArea * 0.4) continue;
+        if (area < MIN_CONTOUR_AREA)  continue;
 
-        if (area > maxArea && area >= MIN_CONTOUR_AREA) {
+        cv::Rect r = cv::boundingRect(c);
+
+        // Фильтр по соотношению сторон: не более 5:1
+        double aspect = (double)std::max(r.width, r.height)
+                    / (std::min(r.width, r.height) + 1);
+        if (aspect > 5.0) continue;
+
+        if (area > maxArea) {
             maxArea = area;
-            best    = cv::boundingRect(c);
+            best    = r;
         }
     }
 

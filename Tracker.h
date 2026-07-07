@@ -5,7 +5,7 @@ class Tracker
 {
 public:
     static constexpr int    DETECTION_FRAMES   = 10;
-    static constexpr double MIN_CONTOUR_AREA   = 500.0;
+    static constexpr double MIN_CONTOUR_AREA   = 300.0;
     static constexpr int    CAMSHIFT_ITERATIONS = 10;
     static constexpr double CAMSHIFT_EPSILON   = 1.0;
 
@@ -55,6 +55,7 @@ private:
     bool _initialized = false;
 
     cv::Rect  _bbox;
+    cv::Rect _smoothedBbox; // сглаженный bbox для отрисовки
     cv::Point _start;
     cv::Point _end;
 };
