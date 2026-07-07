@@ -28,12 +28,23 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     btnPause = new QPushButton("Пауза/Стоп", this);
     layout->addWidget(btnPause);
 
+    // Кнопка фиксации — работает как переключатель
+    btnLock = new QPushButton("Зафиксировать объект", this);
+    btnLock->setEnabled(false); // недоступна пока трекер не нашёл объект
+    btnLock->setCheckable(true);
+    btnLock->setStyleSheet(
+        "QPushButton { background-color: #444; color: white; }"
+        "QPushButton:checked { background-color: #c0392b; color: white; }"
+    );
+    layout->addWidget(btnLock);
+
     setCentralWidget(central);
 
     timer = new QTimer(this);
     connect(timer,       &QTimer::timeout,        this, &MainWindow::updateFrame);
     connect(btnOpen,     &QPushButton::clicked,   this, &MainWindow::openVideo);
     connect(btnPause,    &QPushButton::clicked,   this, &MainWindow::PauseVideo);
+    connect(btnLock,     &QPushButton::clicked,   this, &MainWindow::onLockToggled);
     connect(videoSlider, &QSlider::sliderMoved,   this, &MainWindow::onSliderMoved);
 }
 
@@ -73,9 +84,13 @@ void MainWindow::openVideo()
     videoSlider->setEnabled(true);
     videoSlider->setValue(0);
 
-    // Пересоздаём трекер для нового видео
     delete tracker;
     tracker = new Tracker(cap);
+
+    // Сбрасываем кнопку при открытии нового видео
+    btnLock->setChecked(false);
+    btnLock->setEnabled(false);
+    btnLock->setText("Зафиксировать объект");
 
     timer->start(1000 / static_cast<int>(fps));
 }
@@ -87,6 +102,17 @@ void MainWindow::PauseVideo()
     } else {
         timer->start(1000 / static_cast<int>(fps));
     }
+}
+
+void MainWindow::onLockToggled()
+{
+    if (!tracker) return;
+
+    bool locked = btnLock->isChecked();
+    tracker->setLocked(locked);
+    btnLock->setText(locked ? "Снять фиксацию" : "Зафиксировать объект");
+
+    qDebug() << (locked ? "[UI] объект зафиксирован" : "[UI] фиксация снята");
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -102,48 +128,55 @@ void MainWindow::updateFrame()
         return;
     }
 
-    // Обновляем слайдер
     isSliderUpdating = true;
     videoSlider->setValue(static_cast<int>(cap.get(cv::CAP_PROP_POS_FRAMES)));
     isSliderUpdating = false;
 
-    // ── Трекинг ──────────────────────────────────────────────
     if (tracker) {
         bool found = tracker->findObject(frame);
 
         if (tracker->isDetecting()) {
-            // Идёт фаза детекции — показываем статус
-            cv::putText(frame,
-                        "Detecting object...",
+            // Во время детекции кнопка недоступна
+            btnLock->setEnabled(false);
+            btnLock->setChecked(false);
+            btnLock->setText("Зафиксировать объект");
+
+            cv::putText(frame, "Detecting object...",
                         cv::Point(10, 30),
                         cv::FONT_HERSHEY_SIMPLEX, 0.8,
                         cv::Scalar(0, 200, 255), 2);
         }
         else if (found) {
-            // Трекинг активен — рисуем прямоугольник
+            // Объект найден — разрешаем кнопку
+            btnLock->setEnabled(true);
+
+            cv::Scalar color = tracker->isLocked()
+                ? cv::Scalar(0, 0, 255)   // красный — зафиксирован
+                : cv::Scalar(0, 255, 0);  // зелёный — обычный трекинг
+
             cv::rectangle(frame,
                           tracker->get_start(),
                           tracker->get_end(),
-                          cv::Scalar(0, 255, 0),   // зелёный
-                          2);
+                          color, 2);
 
-            // Подпись над прямоугольником
-            cv::putText(frame,
-                        "Tracking",
+            std::string label = tracker->isLocked() ? "Locked" : "Tracking";
+            cv::putText(frame, label,
                         tracker->get_start() + cv::Point(0, -8),
                         cv::FONT_HERSHEY_SIMPLEX, 0.6,
-                        cv::Scalar(0, 255, 0), 2);
+                        color, 2);
         }
         else {
-            // Трекер потерял объект
-            cv::putText(frame,
-                        "Object lost, re-detecting...",
+            // Объект потерян — сбрасываем фиксацию и кнопку
+            btnLock->setEnabled(false);
+            btnLock->setChecked(false);
+            btnLock->setText("Зафиксировать объект");
+
+            cv::putText(frame, "Object lost, re-detecting...",
                         cv::Point(10, 30),
                         cv::FONT_HERSHEY_SIMPLEX, 0.8,
                         cv::Scalar(0, 0, 255), 2);
         }
     }
-    // ─────────────────────────────────────────────────────────
 
     cv::cvtColor(frame, frame, cv::COLOR_BGR2RGB);
     QImage qimg(frame.data, frame.cols, frame.rows,
@@ -161,8 +194,12 @@ void MainWindow::onSliderMoved(int value)
 
     cap.set(cv::CAP_PROP_POS_FRAMES, value);
 
-    // При перемотке сбрасываем трекер — нужно заново детектировать
-    if (tracker) tracker->reset();
+    if (tracker) {
+        tracker->reset(); // reset() снимает фиксацию внутри
+        btnLock->setEnabled(false);
+        btnLock->setChecked(false);
+        btnLock->setText("Зафиксировать объект");
+    }
 
     updateFrame();
 }

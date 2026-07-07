@@ -29,6 +29,7 @@ void Tracker::reset()
     _initialized     = false;
     _bbox            = cv::Rect();
     _smoothedBbox    = cv::Rect();
+    _locked          = false;
     _start           = cv::Point();
     _end             = cv::Point();
 }
@@ -114,6 +115,10 @@ bool Tracker::trackPhase(const cv::Mat& frame)
     cv::Mat stabilized = stabilizeFrame(frame);
     cv::Mat motionMask = getMotionMask(stabilized, true);
 
+    // Оцениваем общую активность фона (0.0 — 1.0)
+    double totalMotion = (double)cv::countNonZero(motionMask)
+                        / (motionMask.rows * motionMask.cols);
+
     // ── Шаг 1: CamShift ──────────────────────────────────────
     cv::Mat hsv;
     cv::cvtColor(stabilized, hsv, cv::COLOR_BGR2HSV);
@@ -129,10 +134,10 @@ bool Tracker::trackPhase(const cv::Mat& frame)
     cv::calcBackProject(&hsv, 1, channels, _hist, backProj, ranges);
     cv::bitwise_and(backProj, rangeMask, backProj);
 
-    // Для CamShift — расширенная маска (отдельная копия)
-    cv::Mat dilatedMotion;
+    int dilateSize = (totalMotion > 0.15) ? 5 : 15;
     cv::Mat dilateKernel = cv::getStructuringElement(
-        cv::MORPH_ELLIPSE, cv::Size(15, 15));
+        cv::MORPH_ELLIPSE, cv::Size(dilateSize, dilateSize));
+    cv::Mat dilatedMotion;
     cv::dilate(motionMask, dilatedMotion, dilateKernel);
     cv::bitwise_and(backProj, dilatedMotion, backProj);
 
@@ -153,9 +158,7 @@ bool Tracker::trackPhase(const cv::Mat& frame)
         return false;
     }
 
-    // ── Сглаживание bbox — убирает дребезг ───────────────────
-    // EMA (exponential moving average): новый bbox = 0.7*старый + 0.3*новый
-    // Чем ближе alpha к 1.0 — тем инертнее (меньше дребезга, но медленнее реакция)
+    // ── Сглаживание ───────────────────────────────────────────
     const double alpha = 0.7;
     if (!_smoothedBbox.empty()) {
         _smoothedBbox.x      = alpha * _smoothedBbox.x      + (1-alpha) * _bbox.x;
@@ -166,23 +169,35 @@ bool Tracker::trackPhase(const cv::Mat& frame)
         _smoothedBbox = _bbox;
     }
 
-    // ── Шаг 2: поиск кандидата на оригинальной маске (без дилатации)
-    cv::Mat currentRegion   = motionMask(_bbox & frameRect);
-    double  candidateArea   = 0;
-    cv::Rect candidateRect  = largestContourRect(motionMask, &candidateArea);
-    double candidateDensity = candidateArea / (candidateRect.area() + 1);
-    double currentDensity   = (double)cv::countNonZero(currentRegion)
-                              / (_bbox.area() + 1);
+    // ── Шаг 2: поиск более активного объекта (только без фиксации) ──
+    if (!_locked) {
+        cv::Mat currentRegion   = motionMask(_bbox & frameRect);
+        double  candidateArea   = 0;
+        cv::Rect candidateRect  = largestContourRect(motionMask, &candidateArea);
+        double candidateDensity = candidateArea / (candidateRect.area() + 1);
+        double currentDensity   = (double)cv::countNonZero(currentRegion)
+                                  / (_bbox.area() + 1);
 
-    bool isNewObject    = !candidateRect.empty();
-    bool notOverlapping = (candidateRect & _bbox).area()
-                          < candidateRect.area() * 0.3;
-    bool isMoreActive   = candidateDensity > currentDensity * SWITCH_RATIO;
+        // Фон при быстром движении даёт высокую totalMotion —
+        // в таком случае вообще не переключаемся
+        bool backgroundTooActive = totalMotion > 0.4;
 
-    if (isNewObject && notOverlapping && isMoreActive) {
-        _bbox         = candidateRect;
-        _smoothedBbox = candidateRect; // сброс сглаживания при переключении
-        buildHistogram(frame, _bbox);
+        bool isNewObject    = !candidateRect.empty();
+        bool notOverlapping = (candidateRect & _bbox).area()
+                              < candidateRect.area() * 0.3;
+        bool isMoreActive   = candidateDensity > currentDensity * SWITCH_RATIO;
+        bool isCompact      = candidateArea / (candidateRect.area() + 1) > 0.3;
+        double sizeRatio    = (double)candidateRect.area() / (_bbox.area() + 1);
+        bool isSimilarSize  = sizeRatio < 4.0 && sizeRatio > 0.25;
+        bool currentIsStill = currentDensity < 0.05;
+
+        if (!backgroundTooActive && isNewObject && notOverlapping
+            && isMoreActive && isCompact && isSimilarSize && currentIsStill) {
+            qDebug() << "[Tracker] переключаемся на новый объект";
+            _bbox         = candidateRect;
+            _smoothedBbox = candidateRect;
+            buildHistogram(frame, _bbox);
+        }
     }
 
     _start = _smoothedBbox.tl();

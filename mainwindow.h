@@ -22,10 +22,12 @@ private slots:
     void PauseVideo();
     void updateFrame();
     void onSliderMoved(int value);
+    void onLockToggled();
 
 private:
     QPushButton *btnOpen;
     QPushButton *btnPause;
+    QPushButton *btnLock;   // кнопка фиксации на объекте
     QLabel      *videoLabel;
     QSlider     *videoSlider;
     QTimer      *timer;
@@ -35,7 +37,6 @@ private:
     double fps         = 30;
     bool   isSliderUpdating = false;
 
-    // Трекер — создаётся при открытии видео
     Tracker *tracker = nullptr;
 };
 
