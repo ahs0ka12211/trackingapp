@@ -2,11 +2,13 @@
 #define MAINWINDOW_H
 
 #include <QMainWindow>
+#include <QTimer>
+#include <QThread>
 #include <QLabel>
 #include <QPushButton>
 #include <QSlider>
-#include <QTimer>
 #include <opencv2/opencv.hpp>
+#include "Tracker.h"
 
 class MainWindow : public QMainWindow
 {
@@ -16,22 +18,39 @@ public:
     MainWindow(QWidget *parent = nullptr);
     ~MainWindow();
 
-private slots:
+public slots:
     void openVideo();
     void PauseVideo();
     void updateFrame();
     void onSliderMoved(int value);
+    void StartTracker();
+    void onFrameProcessed(cv::Mat visFrame, cv::Mat diffFrame);
+
+signals:
+    void sendFrame(cv::Mat frame);  // Сигнал для отправки кадра в трекер
 
 private:
+    void showFrame(const cv::Mat& frame);
+    void closeEvent(QCloseEvent *event) override;
+
+private:
+    cv::VideoCapture cap;
+    
+    QLabel *videoLabel;
+    QLabel *diffLabel;
     QPushButton *btnOpen;
     QPushButton *btnPause;
-    QLabel *videoLabel;
+    QPushButton *btnStartTracker;
     QSlider *videoSlider;
     QTimer *timer;
-    cv::VideoCapture cap;
-    double totalFrames = 0;
-    double fps = 30;
-    bool isSliderUpdating = false;
+    
+    QThread *trackerThread;
+    Tracker *tracker;
+    
+    double fps;
+    int totalFrames;
+    bool isTracking;
+    bool isSliderUpdating;
 };
 
 #endif // MAINWINDOW_H

@@ -3,10 +3,33 @@
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QDebug>
+#include <QLabel>
+#include <QPushButton>
+#include <QSlider>
+#include <QTimer>
+#include <QThread>
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
+    , cap()
+    , videoLabel(nullptr)
+    , diffLabel(nullptr)
+    , btnOpen(nullptr)
+    , btnPause(nullptr)
+    , btnStartTracker(nullptr)
+    , videoSlider(nullptr)
+    , timer(nullptr)
+    , trackerThread(nullptr)
+    , tracker(nullptr)
+    , fps(30.0)
+    , totalFrames(0)
+    , isTracking(false)
+    , isSliderUpdating(false)
 {
+    // ==========================================================
+    // 1. СОЗДАНИЕ UI
+    // ==========================================================
+    
     // Виджет и layout
     QWidget *central = new QWidget(this);
     QVBoxLayout *layout = new QVBoxLayout(central);
@@ -15,51 +38,98 @@ MainWindow::MainWindow(QWidget *parent)
     btnOpen = new QPushButton("Открыть видео", this);
     layout->addWidget(btnOpen);
 
-    // Label для кадров
+    // Label для основного кадра
     videoLabel = new QLabel(this);
     videoLabel->setAlignment(Qt::AlignCenter);
     videoLabel->setMinimumSize(640, 480);
-    videoLabel->setStyleSheet("background-color: white;");
+    videoLabel->setStyleSheet("background-color: black;");
     layout->addWidget(videoLabel);
 
-    // ---- СЛАЙДЕР ----
-    // Создаем горизонтальный слой для слайдера
+    // Label для разностного кадра (diff)
+    diffLabel = new QLabel(this);
+    diffLabel->setAlignment(Qt::AlignCenter);
+    diffLabel->setMinimumSize(320, 240);
+    diffLabel->setStyleSheet("background-color: black;");
+    layout->addWidget(diffLabel);
+
+    // Слайдер
     QHBoxLayout *sliderLayout = new QHBoxLayout();
-
-    // Создаем слайдер
     videoSlider = new QSlider(Qt::Horizontal, this);
-    videoSlider->setRange(0, 100); // Временный диапазон, обновится при открытии видео
-    videoSlider->setEnabled(false); // Пока нет видео - выключен
+    videoSlider->setRange(0, 100);
+    videoSlider->setEnabled(false);
     videoSlider->setToolTip("Перемотка видео");
-
     sliderLayout->addWidget(videoSlider);
     layout->addLayout(sliderLayout);
-    // -----------------
 
     // Кнопка паузы
     btnPause = new QPushButton("Пауза/Стоп", this);
     layout->addWidget(btnPause);
 
+    // Кнопка запуска трекера
+    btnStartTracker = new QPushButton("Запустить трекер", this);
+    layout->addWidget(btnStartTracker);
+
     setCentralWidget(central);
 
-    // Таймер для обновления кадров
+    // ==========================================================
+    // 2. СОЗДАНИЕ ТРЕКЕРА В ОТДЕЛЬНОМ ПОТОКЕ
+    // ==========================================================
+    
+    trackerThread = new QThread(this);
+    tracker = new Tracker();
+    tracker->moveToThread(trackerThread);
+    
+    // Подключаем сигнал от трекера к слоту отображения
+    connect(tracker, &Tracker::frameProcessed, 
+            this, &MainWindow::onFrameProcessed);
+    
+    // Подключаем сигнал для отправки кадров в трекер
+    connect(this, &MainWindow::sendFrame, 
+            tracker, &Tracker::GetFrame, Qt::QueuedConnection);
+    
+    // Запускаем поток трекера
+    trackerThread->start();
+
+    // ==========================================================
+    // 3. ТАЙМЕР И КНОПКИ
+    // ==========================================================
+    
     timer = new QTimer(this);
     connect(timer, &QTimer::timeout, this, &MainWindow::updateFrame);
     connect(btnOpen, &QPushButton::clicked, this, &MainWindow::openVideo);
     connect(btnPause, &QPushButton::clicked, this, &MainWindow::PauseVideo);
+    connect(btnStartTracker, &QPushButton::clicked, this, &MainWindow::StartTracker);
     connect(videoSlider, &QSlider::sliderMoved, this, &MainWindow::onSliderMoved);
 }
 
 MainWindow::~MainWindow()
 {
-    cap.release();
+    // Останавливаем таймер
+    if (timer && timer->isActive()) {
+        timer->stop();
+    }
+    
+    // Останавливаем поток трекера
+    if (trackerThread && trackerThread->isRunning()) {
+        trackerThread->quit();
+        trackerThread->wait();
+    }
+    
+    // Освобождаем видео
+    if (cap.isOpened()) {
+        cap.release();
+    }
 }
+
+// ==========================================================
+// 4. ОТКРЫТИЕ ВИДЕО
+// ==========================================================
 
 void MainWindow::openVideo()
 {
     QString path = QFileDialog::getOpenFileName(
         this, "Открыть видео", "",
-        "Видео файлы (*.mp4 *.avi *.mkv *.mov *.jpeg *.png)"
+        "Видео файлы (*.mp4 *.avi *.mkv *.mov);;Изображения (*.jpeg *.png *.jpg)"
         );
 
     if (path.isEmpty()) {
@@ -86,10 +156,10 @@ void MainWindow::openVideo()
 
     // Получаем параметры видео
     fps = cap.get(cv::CAP_PROP_FPS);
-    totalFrames = cap.get(cv::CAP_PROP_FRAME_COUNT);
+    totalFrames = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_COUNT));
 
     qDebug() << "FPS:" << fps;
-    qDebug() << "Всего кадров:" << totalFrames;
+    qDebug() << "Frame count:" << totalFrames;
 
     if (fps <= 0) fps = 30;
 
@@ -98,64 +168,187 @@ void MainWindow::openVideo()
     videoSlider->setEnabled(true);
     videoSlider->setValue(0);
 
+    // Сбрасываем состояние трекера
+    isTracking = false;
+    btnStartTracker->setText("Запустить трекер");
+
     // Запускаем воспроизведение
     timer->start(1000 / fps);
 }
+
+// ==========================================================
+// 5. УПРАВЛЕНИЕ ВОСПРОИЗВЕДЕНИЕМ
+// ==========================================================
 
 void MainWindow::PauseVideo()
 {
     if (timer->isActive()) {
         timer->stop();
+        btnPause->setText("Продолжить");
     } else {
         // При возобновлении синхронизируем слайдер с текущим кадром
-        int currentFrame = cap.get(cv::CAP_PROP_POS_FRAMES);
+        int currentFrame = static_cast<int>(cap.get(cv::CAP_PROP_POS_FRAMES));
         videoSlider->setValue(currentFrame);
         timer->start(1000 / fps);
+        btnPause->setText("Пауза/Стоп");
     }
 }
 
+void MainWindow::StartTracker()
+{
+    isTracking = !isTracking;  // Переключаем состояние
+    
+    if (isTracking) {
+        btnStartTracker->setText("Остановить трекер");
+        qDebug() << "Трекер ЗАПУЩЕН";
+    } else {
+        btnStartTracker->setText("Запустить трекер");
+        qDebug() << "Трекер ОСТАНОВЛЕН";
+    }
+}
+
+// ==========================================================
+// 6. ОБНОВЛЕНИЕ КАДРА (ВЫЗЫВАЕТСЯ ПО ТАЙМЕРУ)
+// ==========================================================
+
 void MainWindow::updateFrame()
 {
+    if (!cap.isOpened()) {
+        return;
+    }
+    
     cv::Mat frame;
     cap >> frame;
-
+    
     if (frame.empty()) {
         timer->stop();
         qDebug() << "Видео закончилось";
         return;
     }
-
-    // Обновляем слайдер без отправки сигнала
+    
+    // ==========================================================
+    // ОТПРАВКА КАДРА В ТРЕКЕР (ЕСЛИ ВКЛЮЧЕН)
+    // ==========================================================
+    
+    if (isTracking) {
+        // Отправляем копию кадра в трекер (через сигнал, чтобы попасть в поток трекера)
+        emit sendFrame(frame.clone());
+    }
+    
+    // ==========================================================
+    // ОТОБРАЖЕНИЕ КАДРА НА ЭКРАНЕ
+    // ==========================================================
+    
+    // Если трекер выключен - показываем оригинальный кадр
+    // Если трекер включен - кадр обновится через onFrameProcessed
+    if (!isTracking) {
+        showFrame(frame);
+    }
+    
+    // ==========================================================
+    // ОБНОВЛЕНИЕ СЛАЙДЕРА
+    // ==========================================================
+    
     isSliderUpdating = true;
-    int currentFrame = cap.get(cv::CAP_PROP_POS_FRAMES);
+    int currentFrame = static_cast<int>(cap.get(cv::CAP_PROP_POS_FRAMES));
     videoSlider->setValue(currentFrame);
     isSliderUpdating = false;
+}
 
-    // Рисуем желтый прямоугольник
-    cv::rectangle(frame,
-                  cv::Point(100, 100),
-                  cv::Point(300, 250),
-                  cv::Scalar(0, 255, 255),
-                  2
-                  );
+// ==========================================================
+// 7. ОТОБРАЖЕНИЕ КАДРА НА ЭКРАНЕ
+// ==========================================================
 
-    // Конвертируем и показываем
-    cv::cvtColor(frame, frame, cv::COLOR_BGR2RGB);
-    QImage qimg(frame.data, frame.cols, frame.rows, frame.step, QImage::Format_RGB888);
+void MainWindow::showFrame(const cv::Mat& frame)
+{
+    if (frame.empty()) return;
+    
+    cv::Mat rgb;
+    cv::cvtColor(frame, rgb, cv::COLOR_BGR2RGB);
+    QImage qimg(rgb.data, rgb.cols, rgb.rows, rgb.step, QImage::Format_RGB888);
     videoLabel->setPixmap(QPixmap::fromImage(qimg).scaled(
         videoLabel->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
 }
 
+// ==========================================================
+// 8. СЛОТ ДЛЯ ПРИЕМА РЕЗУЛЬТАТОВ ОТ ТРЕКЕРА
+// ==========================================================
+
+void MainWindow::onFrameProcessed(cv::Mat visFrame, cv::Mat diffFrame)
+{
+    // ==========================================================
+    // ОТОБРАЖЕНИЕ ВИЗУАЛИЗАЦИИ (ЗЕЛЕНЫЕ/КРАСНЫЕ ТОЧКИ)
+    // ==========================================================
+    
+    if (!visFrame.empty()) {
+        cv::Mat rgb;
+        cv::cvtColor(visFrame, rgb, cv::COLOR_BGR2RGB);
+        QImage qimgVis(rgb.data, rgb.cols, rgb.rows, rgb.step, QImage::Format_RGB888);
+        videoLabel->setPixmap(QPixmap::fromImage(qimgVis).scaled(
+            videoLabel->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
+    }
+    
+    // ==========================================================
+    // ОТОБРАЖЕНИЕ РАЗНОСТНОГО КАДРА (DIFF)
+    // ==========================================================
+    
+    if (!diffFrame.empty()) {
+        cv::Mat diffColor;
+        
+        // Если diffFrame одноканальный (grayscale) - конвертим в цветной
+        if (diffFrame.channels() == 1) {
+            cv::cvtColor(diffFrame, diffColor, cv::COLOR_GRAY2BGR);
+        } else {
+            diffColor = diffFrame.clone();
+        }
+        
+        // Конвертим BGR -> RGB для Qt
+        cv::Mat rgbDiff;
+        cv::cvtColor(diffColor, rgbDiff, cv::COLOR_BGR2RGB);
+        QImage qimgDiff(rgbDiff.data, rgbDiff.cols, rgbDiff.rows, 
+                        rgbDiff.step, QImage::Format_RGB888);
+        diffLabel->setPixmap(QPixmap::fromImage(qimgDiff).scaled(
+            diffLabel->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
+    }
+}
+
+// ==========================================================
+// 9. СЛАЙДЕР ПЕРЕМОТКИ
+// ==========================================================
+
 void MainWindow::onSliderMoved(int value)
 {
-    if (isSliderUpdating) return; // Предотвращаем рекурсию
-
+    if (isSliderUpdating) return;
     if (!cap.isOpened()) return;
-
-
+    
     // Устанавливаем позицию в видео
     cap.set(cv::CAP_PROP_POS_FRAMES, value);
-
+    
     // Показываем текущий кадр
     updateFrame();
+}
+
+// ==========================================================
+// 10. ОБРАБОТКА ЗАКРЫТИЯ ОКНА
+// ==========================================================
+
+void MainWindow::closeEvent(QCloseEvent *event)
+{
+    // Останавливаем таймер
+    if (timer && timer->isActive()) {
+        timer->stop();
+    }
+    
+    // Останавливаем поток трекера
+    if (trackerThread && trackerThread->isRunning()) {
+        trackerThread->quit();
+        trackerThread->wait();
+    }
+    
+    // Освобождаем видео
+    if (cap.isOpened()) {
+        cap.release();
+    }
+    
+    QMainWindow::closeEvent(event);
 }

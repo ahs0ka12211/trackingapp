@@ -1,6 +1,8 @@
 QT += widgets
 
 CONFIG += c++17
+CONFIG += console
+CONFIG -= app_bundle
 
 # You can make your code fail to compile if it uses deprecated APIs.
 # In order to do so, uncomment the following line.
@@ -8,10 +10,12 @@ CONFIG += c++17
 
 SOURCES += \
     main.cpp \
-    mainwindow.cpp
+    mainwindow.cpp \
+    Tracker.cpp
 
 HEADERS += \
-    mainwindow.h
+    mainwindow.h \
+    Tracker.h
 
 FORMS += \
     mainwindow.ui
@@ -21,12 +25,13 @@ qnx: target.path = /tmp/$${TARGET}/bin
 else: unix:!android: target.path = /opt/$${TARGET}/bin
 !isEmpty(target.path): INSTALLS += target
 # OpenCV 4.5.5 MinGW
-OPENCV_DIR = W:/RADAR/OPENCV/OpenCV-MinGW-Build-OpenCV-4.5.5-x64/x64/mingw
+OPENCV_DIR = A:\radar\OpenCV-MinGW-Build-OpenCV-4.5.5-x64\x64\mingw
 
 INCLUDEPATH += $$OPENCV_DIR/../../include
 
 LIBS += -L$$OPENCV_DIR/lib \
         -lopencv_core455 \
+        -lopencv_calib3d455 \
         -lopencv_highgui455 \
         -lopencv_imgproc455 \
         -lopencv_imgcodecs455 \

@@ -1,15 +1,15 @@
-#include "mainwindow.h"
-#include <opencv2/core.hpp>
-#include <QDebug>
 #include <QApplication>
-#include <QDebug>
-
+#include "mainwindow.h"
 
 int main(int argc, char *argv[])
 {
-    QApplication a(argc, argv);
+    QApplication app(argc, argv);
+    
+    // Регистрируем cv::Mat для передачи между потоками через сигналы/слоты
+    qRegisterMetaType<cv::Mat>("cv::Mat");
+    
     MainWindow w;
     w.show();
-    return QApplication::exec();
-
+    
+    return app.exec();
 }

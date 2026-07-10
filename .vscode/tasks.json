@@ -1,0 +1,46 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Create build dir",
+            "type": "shell",
+            "command": "mkdir -Force build/Desktop_Qt_6_11_1_MinGW_64_bit" // для Linux/macOS; для Windows используй "mkdir -Force"
+        },
+        {
+            "label": "Run qmake",
+            "type": "shell",
+            "command": "qmake",
+            "args": ["../../Project.pro", "CONFIG+=debug"], // путь до твоего .pro файла
+            "options": {
+                "cwd": "build/Desktop_Qt_6_11_1_MinGW_64_bit"
+            }
+        },
+        {
+            "label": "Run make",
+            "type": "shell",
+            "command": "mingw32-make", // или jom/nmake
+            "options": {
+                "cwd": "build/Desktop_Qt_6_11_1_MinGW_64_bit"
+            }
+        },
+        {
+            "label": "Build",
+            "dependsOn": ["Create build dir", "Run qmake", "Run make"],
+            "dependsOrder": "sequence",
+            "group": {
+                "kind": "build",
+                "isDefault": true // чтобы собирать по Ctrl+Shift+B
+            }
+        },
+        {
+            "label": "Run Project",
+            "type": "shell",
+            "command": "${workspaceFolder}/build/Desktop_Qt_6_11_1_MinGW_64_bit/debug/Project.exe",
+            "options": {
+                "cwd": "${workspaceFolder}/build/Desktop_Qt_6_11_1_MinGW_64_bit/debug"
+            },
+            "group": "none",
+            "problemMatcher": []
+        }
+    ]
+}
