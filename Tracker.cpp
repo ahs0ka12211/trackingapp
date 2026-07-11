@@ -13,6 +13,15 @@ Tracker::Tracker()
     warpBorderErodePx = 9;          // на сколько пикселей сжимать маску валидности warp'а
 
     qRegisterMetaType<cv::Mat>("cv::Mat"); // чтобы frameProcessed() работал через QueuedConnection
+}
+
+void Tracker::setDetectionParams(int diffThreshold_, int minObjectArea_,
+                                  int openKernelSize_, int closeKernelSize_)
+{
+    diffThreshold = diffThreshold_;
+    minObjectArea = minObjectArea_;
+    openKernelSize = openKernelSize_;
+    closeKernelSize = closeKernelSize_;
 } 
  
 
@@ -50,6 +59,7 @@ void Tracker::getFrame(const cv::Mat frame){
     if (N == 0) {
         trackedCorners = detectCorners(frame);
         pointStatus.assign(trackedCorners.size(), 1); // изначально считаем всё фоном
+        pointConfidence.assign(trackedCorners.size(), 0.0f);
         prevGray = V.clone();
         prevFrame = frame.clone();
         H = cv::Mat::eye(3, 3, CV_64F);
@@ -76,12 +86,15 @@ void Tracker::getFrame(const cv::Mat frame){
 
     // Оставляем только точки, которые LK смог уверенно проследить
     std::vector<cv::Point2f> prevGood, currGood;
+    std::vector<float> confGood; // накопленная уверенность этих же точек (по identity, не по пикселю)
     prevGood.reserve(nextPts.size());
     currGood.reserve(nextPts.size());
+    confGood.reserve(nextPts.size());
     for (size_t i = 0; i < nextPts.size(); i++) {
         if (lkStatus[i]) {
             prevGood.push_back(trackedCorners[i]);
             currGood.push_back(nextPts[i]);
+            confGood.push_back(i < pointConfidence.size() ? pointConfidence[i] : 0.0f);
         }
     }
 
@@ -124,6 +137,7 @@ void Tracker::getFrame(const cv::Mat frame){
     std::vector<cv::Point2f> backgroundPts, objectPts;
     std::vector<cv::Point2f> survivedCorners; // точки, которые понесём в следующий кадр
     std::vector<uchar> survivedStatus;
+    std::vector<float> survivedConfidence;
 
     if (!Hnew.empty()) {
         H = Hnew;
@@ -136,28 +150,42 @@ void Tracker::getFrame(const cv::Mat frame){
 
         for (size_t i = 0; i < currGood.size(); i++) {
             float err = static_cast<float>(cv::norm(currGood[i] - warpedPrev[i]));
-            bool isBackground = err <= ransacReprojThreshold;
+            bool instantIsBackground = err <= ransacReprojThreshold;
 
             // У самой рамки кадра reprojection error естественно выше даже для
             // настоящего фона (дисторсия объектива, параллакс, экстраполяция H
             // за пределы зоны, по которой она считалась) - жёсткий порог там
             // ошибочно принимает фон за объект. Поэтому такие точки всегда
-            // считаем фоном, не давая им "стать" ложным объектом.
+            // считаем фоном при обновлении уверенности.
             if (!isInCentralZone(currGood[i], frame.size(), classificationZoneRatio))
-                isBackground = true;
+                instantIsBackground = true;
+
+            // Копим уверенность ПО ЭТОЙ ЖЕ ТОЧКЕ (её identity сохранил LK) -
+            // одно "шумное" отклонение на один кадр почти не сдвигает conf,
+            // а стабильно отклоняющаяся точка (реальный медленный объект)
+            // за несколько кадров пересекает confidenceThreshold.
+            float instant = instantIsBackground ? 0.0f : 1.0f;
+            float conf = confidenceAlpha * instant + (1.0f - confidenceAlpha) * confGood[i];
+
+            bool isBackground = conf < confidenceThreshold;
 
             if (isBackground) backgroundPts.push_back(currGood[i]);
             else               objectPts.push_back(currGood[i]);
 
             survivedCorners.push_back(currGood[i]);
             survivedStatus.push_back(isBackground ? 1 : 0);
+            survivedConfidence.push_back(conf);
         }
     } else {
-        // Гомография не найдена совсем - считаем всё фоном,
-        // H оставляем от предыдущего успешного кадра
+        // Гомография не найдена совсем - решить, фон это или объект, не можем.
+        // Уверенность не поднимаем, а мягко "остужаем" к 0 (а не сбрасываем
+        // резко) - разовый сбой поиска H не должен обнулять историю точки.
         backgroundPts = currGood;
         survivedCorners = currGood;
         survivedStatus.assign(currGood.size(), 1);
+        survivedConfidence.reserve(confGood.size());
+        for (float c : confGood)
+            survivedConfidence.push_back((1.0f - confidenceAlpha) * c);
     }
     // ==========================================================
     // 3. Компенсация движения камеры.
@@ -187,9 +215,45 @@ void Tracker::getFrame(const cv::Mat frame){
     }
 
     // ==========================================================
-    // 4. Визуализация: зелёные точки - фон, красные - объект
+    // 3.5. Накопление diff'а за несколько кадров (экспоненциальное
+    //      скользящее среднее). Это НЕ трогает саму гомографию H -
+    //      она по-прежнему считается строго между соседними кадрами
+    //      (t-1, t), чтобы не расти параллакс и не ломать LK-трекинг
+    //      на большой базе. Копим уже готовый, честный diffFrame:
+    //      случайный шум от кадра к кадру гасится усреднением, а
+    //      сигнал от реально движущегося (пусть и медленного/слабого)
+    //      объекта - накапливается и усиливается.
     // ==========================================================
-    cv::Rect objectBBox = detectMovingObjectBBox(diffFrame, minObjectArea);
+    cv::Mat diffFloat;
+    diffFrame.convertTo(diffFloat, CV_32F);
+
+    if (diffAccumulator.empty() || diffAccumulator.size() != diffFrame.size()) {
+        diffAccumulator = diffFloat.clone(); // на первом кадре / при смене размера - без накопления
+    } else {
+        cv::accumulateWeighted(diffFloat, diffAccumulator, diffAccumAlpha);
+    }
+
+    cv::Mat diffForDetection;
+    diffAccumulator.convertTo(diffForDetection, CV_8U);
+
+    // ==========================================================
+    // 4. Детекция объекта.
+    //    Основной источник - кластер точек с накопленной уверенностью
+    //    (устойчив к шуму и к медленным/слабым объектам, см. п.2).
+    //    Диф-детектор по кадру - подстраховка на случай, если у объекта
+    //    просто нет углов для LK (напр. однотонная поверхность) и точек
+    //    физически не набралось.
+    // ==========================================================
+    cv::Rect objectBBox = clusterObjectBBox(objectPts);
+    if (objectBBox.area() > 0) {
+        // синхронизируем "замок" диф-детектора, чтобы если точки вдруг
+        // потеряются, он подхватил поиск с той же позиции, а не с нуля
+        lastObjectBBox = objectBBox;
+        hasLastObject = true;
+        missedFrames = 0;
+    } else {
+        objectBBox = detectMovingObjectBBox(diffForDetection, minObjectArea);
+    }
 
     cv::Mat vis = drawVisualization(frame, backgroundPts, objectPts);
 
@@ -204,11 +268,29 @@ void Tracker::getFrame(const cv::Mat frame){
     // ==========================================================
     trackedCorners = survivedCorners;
     pointStatus = survivedStatus;
+    pointConfidence = survivedConfidence;
 
     // Пере-детект точек: либо раз в 30 кадров (как и раньше), либо когда
     // точек осталось слишком мало для устойчивой гомографии
     if (N % 30 == 0 || (int)trackedCorners.size() < minPointsToRedetect) {
-        trackedCorners = detectCorners(frame);
+        std::vector<cv::Point2f> freshCorners = detectCorners(frame);
+
+        // Точки, уже накопившие уверенность выше порога (реальный объект),
+        // сохраняем - иначе периодический редетект каждые 30 кадров будет
+        // постоянно обнулять прогресс накопления для медленных/слабых объектов
+        std::vector<cv::Point2f> keptCorners;
+        std::vector<float> keptConfidence;
+        for (size_t i = 0; i < trackedCorners.size(); i++) {
+            if (i < pointConfidence.size() && pointConfidence[i] >= confidenceThreshold) {
+                keptCorners.push_back(trackedCorners[i]);
+                keptConfidence.push_back(pointConfidence[i]);
+            }
+        }
+
+        trackedCorners = keptCorners;
+        pointConfidence = keptConfidence;
+        trackedCorners.insert(trackedCorners.end(), freshCorners.begin(), freshCorners.end());
+        pointConfidence.resize(trackedCorners.size(), 0.0f); // новые точки - без истории, с нуля
         pointStatus.assign(trackedCorners.size(), 1);
     }
 
@@ -424,13 +506,22 @@ cv::Rect Tracker::detectMovingObjectBBox(const cv::Mat& diffFrame, int minArea)
     cv::Mat mask;
     cv::threshold(gray, mask, diffThreshold, 255, cv::THRESH_BINARY);
 
-    // Открытие — убирает одиночные шумные пиксели
-    cv::Mat kernelOpen = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(3, 3));
-    cv::morphologyEx(mask, mask, cv::MORPH_OPEN, kernelOpen);
+    // Открытие — убирает одиночные шумные пиксели.
+    // ВНИМАНИЕ: для мелкого/тонкого объекта (напр. далёкий самолёт) слишком
+    // большое ядро может стереть его diff-пятно целиком - тогда уменьшайте
+    // openKernelSize через setDetectionParams().
+    if (openKernelSize > 0) {
+        cv::Mat kernelOpen = cv::getStructuringElement(cv::MORPH_ELLIPSE,
+                                  cv::Size(openKernelSize, openKernelSize));
+        cv::morphologyEx(mask, mask, cv::MORPH_OPEN, kernelOpen);
+    }
 
     // Закрытие — склеивает разорванный силуэт объекта в одно пятно
-    cv::Mat kernelClose = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(15, 15));
-    cv::morphologyEx(mask, mask, cv::MORPH_CLOSE, kernelClose);
+    if (closeKernelSize > 0) {
+        cv::Mat kernelClose = cv::getStructuringElement(cv::MORPH_ELLIPSE,
+                                   cv::Size(closeKernelSize, closeKernelSize));
+        cv::morphologyEx(mask, mask, cv::MORPH_CLOSE, kernelClose);
+    }
 
     std::vector<std::vector<cv::Point>> contours;
 
@@ -443,18 +534,87 @@ cv::Rect Tracker::detectMovingObjectBBox(const cv::Mat& diffFrame, int minArea)
 
     cv::findContours(mask, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
 
-    cv::Rect bestRect;
-    double bestArea = 0.0;
+    // Собираем все контуры, прошедшие порог площади
+    std::vector<cv::Rect> candidates;
+    std::vector<double> areas;
     for (const auto& c : contours) {
         double area = cv::contourArea(c);
         if (area < minArea) continue;
-        if (area > bestArea) {
-            bestArea = area;
-            bestRect = cv::boundingRect(c);
+        candidates.push_back(cv::boundingRect(c));
+        areas.push_back(area);
+    }
+
+    if (candidates.empty()) {
+        // Ничего не нашли. Если цель была захвачена раньше - даём ей
+        // несколько кадров форы (могла на миг слиться с фоном по цвету),
+        // прежде чем сбрасывать привязку.
+        if (hasLastObject) {
+            missedFrames++;
+            if (missedFrames > maxMissedFrames) {
+                hasLastObject = false;
+                missedFrames = 0;
+            }
+        }
+        return cv::Rect();
+    }
+
+    cv::Point2f frameCenter(gray.cols / 2.0f, gray.rows / 2.0f);
+    float centerBiasRadius = std::max(gray.cols, gray.rows) * centerBiasRadiusRatio;
+
+    int bestIdx = -1;
+
+    if (hasLastObject) {
+        // Есть за что "зацепиться": ищем контур ближайший по центру к
+        // прошлому положению объекта, а НЕ самый большой по площади.
+        // Это критично на видео с параллаксом (напр. обгон на дороге),
+        // где ближние объекты фона (деревья, столбы) часто дают diff-пятно
+        // крупнее реальной цели - выбор "по размеру" в таких сценах
+        // регулярно перескакивает на случайный фон.
+        cv::Point2f lastCenter(lastObjectBBox.x + lastObjectBBox.width / 2.0f,
+                                lastObjectBBox.y + lastObjectBBox.height / 2.0f);
+        float searchRadius = std::max(lastObjectBBox.width, lastObjectBBox.height) * 3.0f + 50.0f;
+
+        double bestDist = std::numeric_limits<double>::max();
+        for (size_t i = 0; i < candidates.size(); i++) {
+            cv::Point2f c(candidates[i].x + candidates[i].width / 2.0f,
+                          candidates[i].y + candidates[i].height / 2.0f);
+            double dist = cv::norm(c - lastCenter);
+            if (dist < searchRadius && dist < bestDist) {
+                bestDist = dist;
+                bestIdx = static_cast<int>(i);
+            }
+        }
+
+        if (bestIdx < 0) {
+            // Рядом с прошлым положением ничего нет в этом кадре
+            missedFrames++;
+            if (missedFrames > maxMissedFrames) {
+                hasLastObject = false; // цель потеряна надолго - разрешаем холодный старт заново
+                missedFrames = 0;
+            }
+            return cv::Rect(); // лучше пропустить кадр, чем скакнуть на случайный фон
+        }
+        missedFrames = 0;
+    } else {
+        // Холодный старт: явного "самого большого" контура тут недостаточно -
+        // объект съёмки обычно ближе к центру кадра, а не у края (там чаще
+        // всего обочина/параллакс-шум). Смешиваем площадь с близостью к центру.
+        double bestScore = -1.0;
+        for (size_t i = 0; i < candidates.size(); i++) {
+            cv::Point2f c(candidates[i].x + candidates[i].width / 2.0f,
+                          candidates[i].y + candidates[i].height / 2.0f);
+            double distToCenter = cv::norm(c - frameCenter);
+            double score = areas[i] / (1.0 + distToCenter / centerBiasRadius);
+            if (score > bestScore) {
+                bestScore = score;
+                bestIdx = static_cast<int>(i);
+            }
         }
     }
 
-    return bestRect; // (0,0,0,0), если ничего не нашли
+    lastObjectBBox = candidates[bestIdx];
+    hasLastObject = true;
+    return lastObjectBBox;
 }
 
 bool Tracker::isInCentralZone(const cv::Point2f& p, const cv::Size& frameSize, float zoneRatio) const
@@ -464,4 +624,54 @@ bool Tracker::isInCentralZone(const cv::Point2f& p, const cv::Size& frameSize, f
 
     return p.x >= marginX && p.x <= frameSize.width  - marginX &&
            p.y >= marginY && p.y <= frameSize.height - marginY;
+}
+
+cv::Rect Tracker::clusterObjectBBox(const std::vector<cv::Point2f>& confidentObjectPts) const
+{
+    if ((int)confidentObjectPts.size() < minObjectPoints)
+        return cv::Rect();
+
+    // Группируем точки в кластеры по близости - точки одного реального
+    // объекта должны лежать компактно, в отличие от случайных шумных
+    // точек, разбросанных по всему кадру
+    std::vector<int> labels;
+    int nClusters = cv::partition(confidentObjectPts, labels,
+        [this](const cv::Point2f& a, const cv::Point2f& b) {
+            return cv::norm(a - b) < clusterRadius;
+        });
+
+    std::vector<int> counts(nClusters, 0);
+    std::vector<cv::Rect> bboxes(nClusters);
+    std::vector<bool> initialized(nClusters, false);
+
+    for (size_t i = 0; i < confidentObjectPts.size(); i++) {
+        int l = labels[i];
+        counts[l]++;
+        cv::Rect r(cv::Point(static_cast<int>(confidentObjectPts[i].x),
+                              static_cast<int>(confidentObjectPts[i].y)),
+                   cv::Size(1, 1));
+        if (!initialized[l]) { bboxes[l] = r; initialized[l] = true; }
+        else                  bboxes[l] |= r;
+    }
+
+    int bestCluster = -1, bestCount = 0;
+    for (int i = 0; i < nClusters; i++) {
+        if (counts[i] >= minObjectPoints && counts[i] > bestCount) {
+            bestCount = counts[i];
+            bestCluster = i;
+        }
+    }
+
+    if (bestCluster < 0)
+        return cv::Rect();
+
+    // Небольшой отступ вокруг облака точек - bbox по самим точкам обычно
+    // уже реального силуэта объекта (края объекта не всегда дают углы)
+    cv::Rect r = bboxes[bestCluster];
+    int pad = 15;
+    r.x -= pad;
+    r.y -= pad;
+    r.width  += 2 * pad;
+    r.height += 2 * pad;
+    return r;
 }
