@@ -85,7 +85,7 @@ MainWindow::MainWindow(QWidget *parent)
     
     // Подключаем сигнал для отправки кадров в трекер
     connect(this, &MainWindow::sendFrame, 
-            tracker, &Tracker::GetFrame, Qt::QueuedConnection);
+            tracker, &Tracker::getFrame, Qt::QueuedConnection);
     
     // Запускаем поток трекера
     trackerThread->start();

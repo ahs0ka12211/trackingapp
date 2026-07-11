@@ -4,15 +4,15 @@
         {
             "label": "Create build dir",
             "type": "shell",
-            "command": "mkdir -Force build/Desktop_Qt_6_11_1_MinGW_64_bit" // для Linux/macOS; для Windows используй "mkdir -Force"
+            "command": "mkdir -Force build/"
         },
         {
             "label": "Run qmake",
             "type": "shell",
             "command": "qmake",
-            "args": ["../../Project.pro", "CONFIG+=debug"], // путь до твоего .pro файла
+            "args": ["../trackingapp.pro"], // путь до .pro файла
             "options": {
-                "cwd": "build/Desktop_Qt_6_11_1_MinGW_64_bit"
+                "cwd": "build/"
             }
         },
         {
@@ -20,12 +20,20 @@
             "type": "shell",
             "command": "mingw32-make", // или jom/nmake
             "options": {
-                "cwd": "build/Desktop_Qt_6_11_1_MinGW_64_bit"
+                "cwd": "build/"
+            }
+        },
+        {
+            "label": "Run make debug",
+            "type": "shell",
+            "command": "mingw32-make debug", // или jom/nmake
+            "options": {
+                "cwd": "build/"
             }
         },
         {
             "label": "Build",
-            "dependsOn": ["Create build dir", "Run qmake", "Run make"],
+            "dependsOn": ["Create build dir", "Run qmake", "Run make", "Run make debug"],
             "dependsOrder": "sequence",
             "group": {
                 "kind": "build",
@@ -33,11 +41,21 @@
             }
         },
         {
+            "label": "Run Project debug",
+            "type": "shell",
+            "command": "${workspaceFolder}/build/debug/trackingapp.exe", //имя .exe совпадает с именем .pro файла
+            "options": {
+                "cwd": "${workspaceFolder}/build/debug"
+            },
+            "group": "none",
+            "problemMatcher": []
+        },
+        {
             "label": "Run Project",
             "type": "shell",
-            "command": "${workspaceFolder}/build/Desktop_Qt_6_11_1_MinGW_64_bit/debug/Project.exe",
+            "command": "${workspaceFolder}/build/release/trackingapp.exe", //имя .exe совпадает с именем .pro файла
             "options": {
-                "cwd": "${workspaceFolder}/build/Desktop_Qt_6_11_1_MinGW_64_bit/debug"
+                "cwd": "${workspaceFolder}/build/release"
             },
             "group": "none",
             "problemMatcher": []

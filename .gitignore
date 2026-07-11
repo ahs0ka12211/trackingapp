@@ -1,0 +1,48 @@
+# Qt / C++ build files
+build/
+*.o
+*.exe
+*.so
+*.dll
+*.a
+*.dylib
+*.user
+*.user.*
+*.creator
+*.files
+*.includes
+*.config
+*.stash
+
+# Debug/Release folders
+debug/
+release/
+*_debug/
+*_release/
+
+# MOC files (Qt auto-generated)
+moc_*.cpp
+moc_*.o
+qrc_*.cpp
+qrc_*.o
+ui_*.h
+
+# VSCode
+.vscode/
+*.code-workspace
+*.json
+
+# Compiled output
+*.out
+*.app
+*.exe
+*.pdb
+*.ilk
+
+# OpenCV build stuff
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
+*.pro

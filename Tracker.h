@@ -28,6 +28,10 @@ private:
     int minPointsToRedetect;                    // порог, ниже которого пере-детектируем углы
     int nmsRadius;                              // радиус подавления немаксимумов, в клетках сетки
 
+    // параметры детекции объекта по diff
+    int diffThreshold = 25;      // порог бинаризации разностного кадра
+    int minObjectArea = 500;     // минимальная площадь контура, чтобы не ловить шум
+
     float ransacReprojThreshold;                 // порог репроекции (в пикселях) для RANSAC при поиске гомографии.
                                                   // Чем больше - тем терпимее к шуму, но тем легче объект "спутать" с фоном
 
@@ -38,6 +42,8 @@ private:
     cv::Mat prevFrame;                           // предыдущий кадр целиком BGR (нужен для варпинга/разности)
     cv::Mat H;                                   // последняя посчитанная гомография: prevFrame -> frame
 
+    float centralZoneRatio;   // доля кадра (по каждой оси), которая используется для оценки H
+
     std::vector<cv::Point2f> detectCorners(const cv::Mat& frame); 
     std::vector<float> buildIntegralImage(const std::vector<float>& data, int width, int height); 
 
@@ -45,6 +51,10 @@ private:
     cv::Mat drawVisualization(const cv::Mat& frame,
                                const std::vector<cv::Point2f>& backgroundPts,
                                const std::vector<cv::Point2f>& objectPts) const;
+    
+    cv::Rect detectMovingObjectBBox(const cv::Mat& diffFrame, int minArea = 500);
+
+    bool isInCentralZone(const cv::Point2f& p, const cv::Size& frameSize) const;
 
 public:
     Tracker();    
@@ -53,7 +63,7 @@ public:
  
 public slots:
     
-    void GetFrame(const cv::Mat frame);
+    void getFrame(const cv::Mat frame);
 
 signals:
 

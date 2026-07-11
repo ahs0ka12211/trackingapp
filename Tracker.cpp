@@ -8,6 +8,7 @@ Tracker::Tracker()
     minPointsToRedetect = 30;                
     nmsRadius = 2;    
     ransacReprojThreshold = 3.0f;
+    centralZoneRatio = 0.7f; // используем центральные 70% кадра для оценки гомографии
 
     qRegisterMetaType<cv::Mat>("cv::Mat"); // чтобы frameProcessed() работал через QueuedConnection
 } 
@@ -34,7 +35,7 @@ std::vector<float> Tracker::buildIntegralImage(const std::vector<float>& data, i
 }
 
 
-void Tracker::GetFrame(const cv::Mat frame){
+void Tracker::getFrame(const cv::Mat frame){
  
     cv::Mat frameHSV;
     cv::cvtColor(frame, frameHSV, cv::COLOR_BGR2HSV);
@@ -84,15 +85,38 @@ void Tracker::GetFrame(const cv::Mat frame){
 
     // ==========================================================
     // 2. Ищем гомографию фона через RANSAC.
-    //    H переводит точки предыдущего кадра в текущий: p_curr ≈ H * p_prev.
-    //    Точки, которые не подчиняются найденной H (outliers по мнению
-    //    RANSAC) - это потенциально движущийся объект, а не фон/камера.
+    //    Оцениваем H только по точкам из центральной зоны кадра -
+    //    на краях сильнее проявляется параллакс (объекты на разной
+    //    глубине сдвигаются по-разному при повороте/зуме камеры,
+    //    а гомография описывает движение только одной плоскости).
+    //    Классификацию background/object делаем ПОСЛЕ, по всем точкам,
+    //    через фактическую ошибку репроекции найденной H.
     // ==========================================================
-    std::vector<uchar> ransacMask;
+    std::vector<cv::Point2f> prevCentral, currCentral;
+    prevCentral.reserve(prevGood.size());
+    currCentral.reserve(currGood.size());
+    for (size_t i = 0; i < prevGood.size(); i++) {
+        // Зону проверяем по текущему кадру - именно в его системе
+        // координат мы потом будем классифицировать точки
+        if (isInCentralZone(currGood[i], frame.size())) {
+            prevCentral.push_back(prevGood[i]);
+            currCentral.push_back(currGood[i]);
+        }
+    }
+
     cv::Mat Hnew;
-    if (prevGood.size() >= 4) {
+    if (prevCentral.size() >= 4) {
+        std::vector<uchar> centralMask; // используется только внутри RANSAC, нам не нужна
+        Hnew = cv::findHomography(prevCentral, currCentral, cv::RANSAC,
+                                ransacReprojThreshold, centralMask);
+    } else if (prevGood.size() >= 4) {
+        // Фоллбэк: если в центре осталось слишком мало точек
+        // (например, объект целиком закрыл центр кадра) - берём все,
+        // неидеальная H лучше, чем её отсутствие
+        std::vector<uchar> fallbackMask;
         Hnew = cv::findHomography(prevGood, currGood, cv::RANSAC,
-                                   ransacReprojThreshold, ransacMask);
+                                ransacReprojThreshold, fallbackMask);
+        qDebug() << "[Tracker] мало точек в центре, H считается по всему кадру";
     }
 
     std::vector<cv::Point2f> backgroundPts, objectPts;
@@ -101,8 +125,17 @@ void Tracker::GetFrame(const cv::Mat frame){
 
     if (!Hnew.empty()) {
         H = Hnew;
+
+        // Классифицируем ВСЕ точки (включая краевые) по реальной ошибке
+        // репроекции через H, а не по RANSAC-маске (та считалась только
+        // для центральной подвыборки и не соответствует размеру currGood)
+        std::vector<cv::Point2f> warpedPrev;
+        cv::perspectiveTransform(prevGood, warpedPrev, H);
+
         for (size_t i = 0; i < currGood.size(); i++) {
-            bool isBackground = ransacMask[i] != 0;
+            float err = static_cast<float>(cv::norm(currGood[i] - warpedPrev[i]));
+            bool isBackground = err <= ransacReprojThreshold;
+
             if (isBackground) backgroundPts.push_back(currGood[i]);
             else               objectPts.push_back(currGood[i]);
 
@@ -110,14 +143,12 @@ void Tracker::GetFrame(const cv::Mat frame){
             survivedStatus.push_back(isBackground ? 1 : 0);
         }
     } else {
-        // Точек мало / гомография не найдена (например, резкий рывок камеры,
-        // либо кадр почти целиком занят объектом) - считаем всё фоном,
+        // Гомография не найдена совсем - считаем всё фоном,
         // H оставляем от предыдущего успешного кадра
         backgroundPts = currGood;
         survivedCorners = currGood;
         survivedStatus.assign(currGood.size(), 1);
     }
-
     // ==========================================================
     // 3. Компенсация движения камеры.
     //    "Перематываем" предыдущий кадр через H в систему координат
@@ -135,7 +166,13 @@ void Tracker::GetFrame(const cv::Mat frame){
     // ==========================================================
     // 4. Визуализация: зелёные точки - фон, красные - объект
     // ==========================================================
+    cv::Rect objectBBox = detectMovingObjectBBox(diffFrame, minObjectArea);
+
     cv::Mat vis = drawVisualization(frame, backgroundPts, objectPts);
+
+    if (objectBBox.area() > 0) {
+        cv::rectangle(vis, objectBBox, cv::Scalar(0, 255, 255), 2); // жёлтый прямоугольник
+    }
 
     emit frameProcessed(vis, diffFrame);
 
@@ -348,4 +385,60 @@ std::vector<cv::Point2f> Tracker::detectCorners(const cv::Mat& frame)
     
 
     return corners;
+}
+
+cv::Rect Tracker::detectMovingObjectBBox(const cv::Mat& diffFrame, int minArea)
+{
+    if (diffFrame.empty()) return cv::Rect();
+
+    cv::Mat gray;
+    if (diffFrame.channels() == 3)
+        cv::cvtColor(diffFrame, gray, cv::COLOR_BGR2GRAY);
+    else
+        gray = diffFrame;
+
+    // Отсекаем слабый шум компенсации (мелкие несовпадения из-за неидеальной H)
+    cv::Mat mask;
+    cv::threshold(gray, mask, diffThreshold, 255, cv::THRESH_BINARY);
+
+    // Открытие — убирает одиночные шумные пиксели
+    cv::Mat kernelOpen = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(3, 3));
+    cv::morphologyEx(mask, mask, cv::MORPH_OPEN, kernelOpen);
+
+    // Закрытие — склеивает разорванный силуэт объекта в одно пятно
+    cv::Mat kernelClose = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(15, 15));
+    cv::morphologyEx(mask, mask, cv::MORPH_CLOSE, kernelClose);
+
+    std::vector<std::vector<cv::Point>> contours;
+
+    int borderX = static_cast<int>(mask.cols * 0.05);
+    int borderY = static_cast<int>(mask.rows * 0.05);
+    mask(cv::Rect(0, 0, mask.cols, borderY)).setTo(0);
+    mask(cv::Rect(0, mask.rows - borderY, mask.cols, borderY)).setTo(0);
+    mask(cv::Rect(0, 0, borderX, mask.rows)).setTo(0);
+    mask(cv::Rect(mask.cols - borderX, 0, borderX, mask.rows)).setTo(0);
+
+    cv::findContours(mask, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+
+    cv::Rect bestRect;
+    double bestArea = 0.0;
+    for (const auto& c : contours) {
+        double area = cv::contourArea(c);
+        if (area < minArea) continue;
+        if (area > bestArea) {
+            bestArea = area;
+            bestRect = cv::boundingRect(c);
+        }
+    }
+
+    return bestRect; // (0,0,0,0), если ничего не нашли
+}
+
+bool Tracker::isInCentralZone(const cv::Point2f& p, const cv::Size& frameSize) const
+{
+    float marginX = frameSize.width  * (1.0f - centralZoneRatio) / 2.0f;
+    float marginY = frameSize.height * (1.0f - centralZoneRatio) / 2.0f;
+
+    return p.x >= marginX && p.x <= frameSize.width  - marginX &&
+           p.y >= marginY && p.y <= frameSize.height - marginY;
 }
