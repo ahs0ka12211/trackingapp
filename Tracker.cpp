@@ -15,7 +15,7 @@ Tracker::Tracker()
     ransacReprojThreshold = 3.0f;
     centralZoneRatio = 0.68f;
     classificationZoneRatio = 0.88f;
-    warpBorderErodePx = 10;
+    warpBorderErodePx = 12;
 
     qRegisterMetaType<cv::Mat>("cv::Mat");
 }
@@ -42,7 +42,7 @@ void Tracker::recalcStepDependentParams()
 
     float densityRatio = scale * scale;
     int newMinPoints = static_cast<int>(std::round(kBaseMinPointsToRedetect * densityRatio));
-    if (newMinPoints < 10) newMinPoints = 10;
+    if (newMinPoints < 12) newMinPoints = 12;
     minPointsToRedetect = newMinPoints;
 
     qDebug() << "[Tracker] step =" << step
@@ -103,10 +103,21 @@ void Tracker::getFrame(const cv::Mat frame){
     std::vector<float> lkErr;
 
     if (!trackedCorners.empty()) {
+        int lkFlags = 0;
+
+        if (!H.empty()) {
+            cv::perspectiveTransform(trackedCorners, nextPts, H);
+            lkFlags = cv::OPTFLOW_USE_INITIAL_FLOW;
+        }
+
+        float cameraMotionEst = cv::norm(H - cv::Mat::eye(3,3,CV_64F), cv::NORM_L2);
+        int maxLevel = (cameraMotionEst > 12.0f) ? 5 : 4;
+
         cv::calcOpticalFlowPyrLK(
             prevGray, V, trackedCorners, nextPts, lkStatus, lkErr,
-            cv::Size(21, 21), 3,
-            cv::TermCriteria(cv::TermCriteria::COUNT + cv::TermCriteria::EPS, 30, 0.01)
+            cv::Size(21, 21), maxLevel,
+            cv::TermCriteria(cv::TermCriteria::COUNT + cv::TermCriteria::EPS, 30, 0.01),
+            lkFlags
         );
     }
 
@@ -127,7 +138,7 @@ void Tracker::getFrame(const cv::Mat frame){
     if (framesSinceAnchor >= minAnchorBaselineFrames && anchorGood.size() >= 4) {
         std::vector<uchar> anchorMask;
         Hanchor = cv::findHomography(anchorGood, currGood, cv::RANSAC,
-                                      ransacReprojThreshold, anchorMask);
+                                      anchorBaseReprojThreshold, anchorMask);
         haveAnchorH = !Hanchor.empty();
     }
 
@@ -138,7 +149,7 @@ void Tracker::getFrame(const cv::Mat frame){
     float anchorThresh = anchorBaseReprojThreshold *
                           (1.0f + 0.25f * std::sqrt(static_cast<float>(framesSinceAnchor)));
 
-    // 2. Гомография фона
+    // 2. Гомография фона (улучшенная)
     std::vector<cv::Point2f> prevCentral, currCentral;
     for (size_t i = 0; i < prevGood.size(); i++) {
         if (isInCentralZone(currGood[i], frame.size(), centralZoneRatio)) {
@@ -147,15 +158,40 @@ void Tracker::getFrame(const cv::Mat frame){
         }
     }
 
+    // Очистка от области объекта
+    if (hasLastObject && !lastObjectBBox.empty()) {
+        cv::Rect forbidden = lastObjectBBox;
+        forbidden.x -= 50;
+        forbidden.y -= 50;
+        forbidden.width += 100;
+        forbidden.height += 100;
+
+        std::vector<cv::Point2f> pc, cc;
+        for (size_t i = 0; i < prevCentral.size(); ++i) {
+            if (!forbidden.contains(currCentral[i])) {
+                pc.push_back(prevCentral[i]);
+                cc.push_back(currCentral[i]);
+            }
+        }
+        if (pc.size() >= 6) {
+            prevCentral = std::move(pc);
+            currCentral = std::move(cc);
+        }
+    }
+
     cv::Mat Hnew;
-    if (prevCentral.size() >= 4) {
+    float cameraMotion = 0.0f;
+    if (prevCentral.size() >= 6) {
         std::vector<uchar> centralMask;
+        int iterations = 2500;
+        float reproj = ransacReprojThreshold * (1.0f + std::min(cameraMotion, 12.0f) * 0.12f);
+        
         Hnew = cv::findHomography(prevCentral, currCentral, cv::RANSAC,
-                                ransacReprojThreshold, centralMask);
-    } else if (prevGood.size() >= 4) {
+                                  reproj, centralMask, iterations);
+    } else if (prevGood.size() >= 8) {
         std::vector<uchar> fallbackMask;
         Hnew = cv::findHomography(prevGood, currGood, cv::RANSAC,
-                                ransacReprojThreshold, fallbackMask);
+                                ransacReprojThreshold * 1.4f, fallbackMask);
         qDebug() << "[Tracker] мало точек в центре, H считается по всему кадру";
     }
 
@@ -166,17 +202,24 @@ void Tracker::getFrame(const cv::Mat frame){
 
     if (!Hnew.empty()) {
         H = Hnew;
+        cameraMotion = cv::norm(H - cv::Mat::eye(3,3,CV_64F), cv::NORM_L2);
+
+        if (hasLastObject) {
+            lastObjectBBox = warpBBox(lastObjectBBox, H, frame.size());
+        }
 
         std::vector<cv::Point2f> warpedPrev;
         cv::perspectiveTransform(prevGood, warpedPrev, H);
 
-        float cameraMotion = cv::norm(H - cv::Mat::eye(3,3,CV_64F), cv::NORM_L2);
+        float dynamicReprojThreshold = ransacReprojThreshold *
+            (1.0f + std::min(cameraMotion, 15.0f) * 0.12f);
 
-        survivedAnchor.reserve(currGood.size());
+        float currentRadialThresh = radialMotionThreshold;
+        if (cameraMotion > 10.0f) currentRadialThresh = 0.48f;
 
         for (size_t i = 0; i < currGood.size(); i++) {
             float err = static_cast<float>(cv::norm(currGood[i] - warpedPrev[i]));
-            bool isBackground = err <= ransacReprojThreshold;
+            bool isBackground = err <= dynamicReprojThreshold;
 
             // ====================== РАДИАЛЬНЫЙ БУСТ ======================
             if (isBackground && useRadialBoost && haveAnchorH && cameraMotion < radialBoostMaxCameraMotion) {
@@ -194,7 +237,7 @@ void Tracker::getFrame(const cv::Mat frame){
                     float errLong = haveAnchorH ? 
                         static_cast<float>(cv::norm(currGood[i] - warpedAnchor[i])) : 0;
 
-                    if (radialness > radialMotionThreshold && errLong > anchorThresh * 0.6f) {
+                    if (radialness > currentRadialThresh && errLong > anchorThresh * 0.55f) {
                         isBackground = false;
                     }
                 }
@@ -208,11 +251,11 @@ void Tracker::getFrame(const cv::Mat frame){
                     isBackground = false;
             }
 
-            // Защита от параллакса близких объектов фона
+            // Защита от параллакса
             if (isBackground && hasLastObject && isNearLastObject(currGood[i], 45.0f)) {
                 float errLong = haveAnchorH ? 
                     static_cast<float>(cv::norm(currGood[i] - warpedAnchor[i])) : 0;
-                if (errLong > anchorThresh * 0.7f)
+                if (errLong > anchorThresh * 0.65f)
                     isBackground = false;
             }
 
@@ -236,6 +279,7 @@ void Tracker::getFrame(const cv::Mat frame){
 
     // 3. Компенсация + diff
     cv::Mat diffFrame = cv::Mat::zeros(frame.size(), frame.type());
+    cv::Mat shadowMask;
     if (!H.empty() && !prevFrame.empty()) {
         cv::Mat warpedPrev;
         cv::warpPerspective(prevFrame, warpedPrev, H, frame.size());
@@ -247,6 +291,34 @@ void Tracker::getFrame(const cv::Mat frame){
                   cv::getStructuringElement(cv::MORPH_ELLIPSE,
                       cv::Size(warpBorderErodePx, warpBorderErodePx)));
         diffFrame.setTo(cv::Scalar::all(0), validMask == 0);
+
+        shadowMask = computeShadowMask(frame, warpedPrev);
+        if (!shadowMask.empty()) {
+            shadowMask.setTo(0, validMask == 0);
+            diffFrame.setTo(cv::Scalar::all(0), shadowMask);
+        }
+    }
+
+    // Переклассификация по тени
+    if (!shadowMask.empty()) {
+        for (size_t i = 0; i < survivedCorners.size(); i++) {
+            if (survivedStatus[i] == 0) {
+                const cv::Point2f& pt = survivedCorners[i];
+                int x = cvRound(pt.x);
+                int y = cvRound(pt.y);
+                if (x >= 0 && y >= 0 && x < shadowMask.cols && y < shadowMask.rows &&
+                    shadowMask.at<uchar>(y, x) > 0) {
+                    survivedStatus[i] = 1;
+                }
+            }
+        }
+
+        backgroundPts.clear();
+        objectPts.clear();
+        for (size_t i = 0; i < survivedCorners.size(); i++) {
+            if (survivedStatus[i]) backgroundPts.push_back(survivedCorners[i]);
+            else                   objectPts.push_back(survivedCorners[i]);
+        }
     }
 
     // Усиление diff feature points объекта
@@ -297,7 +369,7 @@ void Tracker::getFrame(const cv::Mat frame){
         anchorCorners = trackedCorners;
         framesSinceAnchor = 0;
     }
-    else if (framesSinceAnchor >= anchorRefreshInterval) {
+    else if (framesSinceAnchor >= (cameraMotion > 9.0f ? 6 : anchorRefreshInterval)) {
         anchorCorners = trackedCorners;
         framesSinceAnchor = 0;
     }
@@ -325,9 +397,8 @@ cv::Mat Tracker::drawVisualization(const cv::Mat& frame,
 
 std::vector<cv::Point2f> Tracker::detectCorners(const cv::Mat& V)
 {
-    // (код detectCorners без изменений)
     int widthMAP = (V.size().width - step - 1) / step;
-    int heightMAP = (V.size().height -step - 1) / step;
+    int heightMAP = (V.size().height - step - 1) / step;
     int sizeMAP = widthMAP * heightMAP;
     std::vector<float> DX2(sizeMAP);
     std::vector<float> DY2(sizeMAP);
@@ -355,7 +426,7 @@ std::vector<cv::Point2f> Tracker::detectCorners(const cv::Mat& V)
     std::vector<float> integralDY2 = buildIntegralImage(DY2, widthMAP, heightMAP);
     std::vector<float> integralDXY = buildIntegralImage(DXY, widthMAP, heightMAP);
 
-    int halfWindow = windowSize /2;
+    int halfWindow = windowSize / 2;
 
     std::vector<float> DX2_blurred(sizeMAP, 0.0f);
     std::vector<float> DY2_blurred(sizeMAP, 0.0f);
@@ -554,7 +625,7 @@ cv::Rect Tracker::detectMovingObjectBBox(const cv::Mat& diffFrame,
             double dist = cv::norm(c - lastCenter);
             if (dist > searchRadius) continue;
 
-            double score = areas[i] * 0.6 + objectPointCounts[i] * 25.0 - dist * 0.8;
+            double score = areas[i] * 0.55 + objectPointCounts[i] * 32.0 - dist * 0.7;
             if (score > bestScore) {
                 bestScore = score;
                 bestIdx = static_cast<int>(i);
@@ -594,6 +665,64 @@ cv::Rect Tracker::detectMovingObjectBBox(const cv::Mat& diffFrame,
     return cv::Rect();
 }
 
+// ====================== computeShadowMask ======================
+cv::Mat Tracker::computeShadowMask(const cv::Mat& currFrame, const cv::Mat& bgFrame) const
+{
+    if (currFrame.empty() || bgFrame.empty() || currFrame.size() != bgFrame.size())
+        return cv::Mat();
+
+    cv::Mat currHSV, bgHSV;
+    cv::cvtColor(currFrame, currHSV, cv::COLOR_BGR2HSV);
+    cv::cvtColor(bgFrame, bgHSV, cv::COLOR_BGR2HSV);
+
+    std::vector<cv::Mat> currCh, bgCh;
+    cv::split(currHSV, currCh);
+    cv::split(bgHSV, bgCh);
+
+    const cv::Mat& curH = currCh[0];
+    const cv::Mat& curS = currCh[1];
+    const cv::Mat& curV = currCh[2];
+    const cv::Mat& bgH  = bgCh[0];
+    const cv::Mat& bgS  = bgCh[1];
+    const cv::Mat& bgV  = bgCh[2];
+
+    cv::Mat diffS, diffH;
+    cv::absdiff(curS, bgS, diffS);
+    cv::absdiff(curH, bgH, diffH);
+    cv::Mat diffHWrapped = cv::min(diffH, 180 - diffH);
+
+    cv::Mat shadowMask = cv::Mat::zeros(currFrame.size(), CV_8U);
+
+    for (int y = 0; y < shadowMask.rows; y++) {
+        const uchar* rowCurV = curV.ptr<uchar>(y);
+        const uchar* rowBgV  = bgV.ptr<uchar>(y);
+        const uchar* rowDiffS = diffS.ptr<uchar>(y);
+        const uchar* rowDiffH = diffHWrapped.ptr<uchar>(y);
+        uchar* rowOut = shadowMask.ptr<uchar>(y);
+
+        for (int x = 0; x < shadowMask.cols; x++) {
+            float vCur = static_cast<float>(rowCurV[x]);
+            float vBg  = static_cast<float>(rowBgV[x]) + 1.0f;
+            float ratio = vCur / vBg;
+
+            bool darkerButNotTooMuch = (ratio >= shadowVRatioMin) && (ratio <= shadowVRatioMax);
+            bool hueStable = rowDiffH[x] <= shadowHueDiffMax;
+            bool satStable = rowDiffS[x] <= shadowSatDiffMax;
+
+            if (darkerButNotTooMuch && hueStable && satStable)
+                rowOut[x] = 255;
+        }
+    }
+
+    if (shadowOpenKernelSize > 0) {
+        cv::Mat kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE,
+                             cv::Size(shadowOpenKernelSize, shadowOpenKernelSize));
+        cv::morphologyEx(shadowMask, shadowMask, cv::MORPH_OPEN, kernel);
+    }
+
+    return shadowMask;
+}
+
 bool Tracker::isInCentralZone(const cv::Point2f& p, const cv::Size& frameSize, float zoneRatio) const
 {
     float marginX = frameSize.width  * (1.0f - zoneRatio) / 2.0f;
@@ -613,3 +742,30 @@ bool Tracker::isNearLastObject(const cv::Point2f& p, float margin) const
     expanded.height += static_cast<int>(margin * 2);
     return expanded.contains(cv::Point(cvRound(p.x), cvRound(p.y)));
 }
+
+cv::Rect Tracker::warpBBox(const cv::Rect& bbox, const cv::Mat& H, const cv::Size& frameSize) const
+{
+    if (H.empty() || bbox.area() <= 0) return bbox;
+
+    std::vector<cv::Point2f> corners = {
+        cv::Point2f(static_cast<float>(bbox.x), static_cast<float>(bbox.y)),
+        cv::Point2f(static_cast<float>(bbox.x + bbox.width), static_cast<float>(bbox.y)),
+        cv::Point2f(static_cast<float>(bbox.x + bbox.width), static_cast<float>(bbox.y + bbox.height)),
+        cv::Point2f(static_cast<float>(bbox.x), static_cast<float>(bbox.y + bbox.height))
+    };
+
+    std::vector<cv::Point2f> warped;
+    cv::perspectiveTransform(corners, warped, H);
+
+    cv::Rect result = cv::boundingRect(warped);
+
+    float areaRatio = static_cast<float>(result.area()) / (bbox.area() + 1.0f);
+    if (areaRatio < 0.25f || areaRatio > 4.5f) {
+        return bbox;
+    }
+
+    cv::Rect sane(-frameSize.width, -frameSize.height,
+                  frameSize.width * 3, frameSize.height * 3);
+    cv::Rect clipped = result & sane;
+    return clipped.area() > 0 ? clipped : bbox;
+}  

@@ -2,13 +2,10 @@
 #define TRACKER_HPP
 
 #include <vector>
-#include <array>
 #include <opencv2/opencv.hpp>
 #include <QDebug>
 #include <QObject>
-#include <QThread>
 #include <QMetaType>
-#include <limits>
 #include <cmath>
 
 Q_DECLARE_METATYPE(cv::Mat)
@@ -28,7 +25,7 @@ private:
     static constexpr int kBaseStep = 5;
     static constexpr int kBaseWindowSize = 7;
     static constexpr int kBaseNmsRadius = 2;
-    static constexpr int kBaseMinPointsToRedetect = 30;
+    static constexpr int kBaseMinPointsToRedetect = 35;  // чуть повысили
 
     void recalcStepDependentParams();
     
@@ -42,7 +39,7 @@ private:
     cv::Rect lastObjectBBox;
     bool hasLastObject = false;
     int missedFrames = 0;
-    int maxMissedFrames = 15;
+    int maxMissedFrames = 18;           // чуть увеличил терпимость
     float centerBiasRadiusRatio = 0.32f;
 
     float ransacReprojThreshold = 3.0f;
@@ -52,12 +49,19 @@ private:
     int framesSinceAnchor = 0;
     int anchorRefreshInterval = 10;
     int minAnchorBaselineFrames = 4;
-    float anchorBaseReprojThreshold = 3.2f;
+    float anchorBaseReprojThreshold = 3.3f;
 
     // Motion Evidence
     cv::Mat motionEvidence;
-    float motionEvidenceAlpha = 0.20f;
-    float motionEvidenceThreshold = 0.4f;
+    float motionEvidenceAlpha = 0.22f;
+    float motionEvidenceThreshold = 0.38f;
+
+    // Фильтрация теней
+    float shadowVRatioMin = 0.25f;
+    float shadowVRatioMax = 0.92f;
+    int   shadowSatDiffMax = 60;
+    int   shadowHueDiffMax = 20;
+    int   shadowOpenKernelSize = 3;
 
     std::vector<cv::Point2f> trackedCorners;
     std::vector<uchar> pointStatus;
@@ -68,13 +72,13 @@ private:
 
     float centralZoneRatio = 0.68f;
     float classificationZoneRatio = 0.88f;
-    int warpBorderErodePx = 10;
+    int warpBorderErodePx = 12;         // чуть увеличил
 
     // Радиальный буст
     bool useRadialBoost = true;
     float radialMotionThreshold = 0.57f;
-    float radialBoostMaxCameraMotion = 14.0f;
-    float minRadialMotionLen = 0.28f;
+    float radialBoostMaxCameraMotion = 15.0f;
+    float minRadialMotionLen = 0.25f;   // чуть ослабил
 
     double lastKnownArea = 0.0;
 
@@ -90,7 +94,10 @@ private:
                                     int minArea = 500);
 
     bool isInCentralZone(const cv::Point2f& p, const cv::Size& frameSize, float zoneRatio) const;
-    bool isNearLastObject(const cv::Point2f& p, float margin = 60.0f) const;
+    bool isNearLastObject(const cv::Point2f& p, float margin = 50.0f) const;
+
+    cv::Rect warpBBox(const cv::Rect& bbox, const cv::Mat& H, const cv::Size& frameSize) const;
+    cv::Mat computeShadowMask(const cv::Mat& currFrame, const cv::Mat& bgFrame) const;
 
 public:
     Tracker();    
@@ -102,6 +109,15 @@ public:
     void setGridStep(int step_);
     int getGridStep() const { return step; }
     void setRadialBoost(bool enable) { useRadialBoost = enable; }
+
+    void setShadowFilterParams(float vRatioMin, float vRatioMax,
+                                int satDiffMax, int hueDiffMax)
+    {
+        shadowVRatioMin = vRatioMin;
+        shadowVRatioMax = vRatioMax;
+        shadowSatDiffMax = satDiffMax;
+        shadowHueDiffMax = hueDiffMax;
+    }
 
 public slots:
     void getFrame(const cv::Mat frame);
