@@ -80,14 +80,25 @@ private:
     float radialBoostMaxCameraMotion = 15.0f;
     float minRadialMotionLen = 0.25f;   // чуть ослабил
 
+    int shadowPatchRadius = 3;
+    float shadowValueRatioMin = 0.25f;   // темнее этого - не тень, а что-то другое
+    float shadowValueRatioMax = 0.90f;   // светлее этого - разницы почти нет, не тень
+    float shadowSatDeltaMax = 40.0f;     // макс. допустимое изменение насыщенности (0..255)
+    float shadowHueDeltaMaxDeg = 20.0f;  // макс. допустимое изменение тона, в градусах
+
     double lastKnownArea = 0.0;
 
     std::vector<cv::Point2f> detectCorners(const cv::Mat& V);
     std::vector<float> buildIntegralImage(const std::vector<float>& data, int width, int height); 
 
+    #ifdef QT_DEBUG
+    // Отрисовка кадра: зелёные точки - фон, красные - объект.
+    // Существует только в debug-сборке - в release не нужна для работы
+    // алгоритма, только для визуальной отладки.
     cv::Mat drawVisualization(const cv::Mat& frame,
                                const std::vector<cv::Point2f>& backgroundPts,
                                const std::vector<cv::Point2f>& objectPts) const;
+    #endif
     
     cv::Rect detectMovingObjectBBox(const cv::Mat& diffFrame, 
                                     const std::vector<cv::Point2f>& objectFeaturePts,
@@ -98,6 +109,7 @@ private:
 
     cv::Rect warpBBox(const cv::Rect& bbox, const cv::Mat& H, const cv::Size& frameSize) const;
     cv::Mat computeShadowMask(const cv::Mat& currFrame, const cv::Mat& bgFrame) const;
+    bool isShadowPoint(const cv::Point2f& p, const cv::Mat& frameHSV, const cv::Mat& refHSV) const;
 
 public:
     Tracker();    

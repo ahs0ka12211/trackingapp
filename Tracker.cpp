@@ -200,6 +200,11 @@ void Tracker::getFrame(const cv::Mat frame){
     std::vector<uchar> survivedStatus;
     std::vector<cv::Point2f> survivedAnchor;
 
+    // Полный варп предыдущего кадра - нужен и для HSV-теста тени (ниже, в
+    // цикле классификации), и для diff (шаг 3). Объявляем здесь, на уровне
+    // функции, чтобы не считать warpPerspective дважды.
+    cv::Mat warpedPrevImg;
+
     if (!Hnew.empty()) {
         H = Hnew;
         cameraMotion = cv::norm(H - cv::Mat::eye(3,3,CV_64F), cv::NORM_L2);
@@ -208,7 +213,11 @@ void Tracker::getFrame(const cv::Mat frame){
             lastObjectBBox = warpBBox(lastObjectBBox, H, frame.size());
         }
 
-        std::vector<cv::Point2f> warpedPrev;
+        cv::warpPerspective(prevFrame, warpedPrevImg, H, frame.size());
+        cv::Mat warpedPrevHSV;
+        cv::cvtColor(warpedPrevImg, warpedPrevHSV, cv::COLOR_BGR2HSV);
+
+        std::vector<cv::Point2f> warpedPrev; // это ТОЧКИ (не картинка) - имя как было
         cv::perspectiveTransform(prevGood, warpedPrev, H);
 
         float dynamicReprojThreshold = ransacReprojThreshold *
@@ -218,6 +227,23 @@ void Tracker::getFrame(const cv::Mat frame){
         if (cameraMotion > 10.0f) currentRadialThresh = 0.48f;
 
         for (size_t i = 0; i < currGood.size(); i++) {
+
+            // ====================== ФИЛЬТР ТЕНЕЙ ======================
+            // Тень "приклеена" к движущемуся объекту и трекается вместе с
+            // ним, но физически не является ни фоном, ни объектом - не
+            // должна ни портить гомографию, ни раздувать bbox объекта.
+            // Сравниваем HSV текущего пикселя с HSV того же места на
+            // warpedPrev (это и есть наш "эталон, каким пиксель должен
+            // быть без независимого движения"): тень не меняет тон и
+            // насыщенность поверхности, только её яркость - и не до нуля.
+            if (isShadowPoint(currGood[i], frameHSV, warpedPrevHSV)) {
+                survivedCorners.push_back(currGood[i]);
+                survivedStatus.push_back(1); // трекаем дальше как фон, но не используем как улику
+                survivedAnchor.push_back(anchorGood[i]);
+                continue; // не в backgroundPts, не в objectPts
+            }
+            // ============================================================
+
             float err = static_cast<float>(cv::norm(currGood[i] - warpedPrev[i]));
             bool isBackground = err <= dynamicReprojThreshold;
 
@@ -282,7 +308,11 @@ void Tracker::getFrame(const cv::Mat frame){
     cv::Mat shadowMask;
     if (!H.empty() && !prevFrame.empty()) {
         cv::Mat warpedPrev;
-        cv::warpPerspective(prevFrame, warpedPrev, H, frame.size());
+        if (!warpedPrevImg.empty()) {
+            warpedPrev = warpedPrevImg; // уже посчитан выше для теста тени - не дублируем
+        } else {
+            cv::warpPerspective(prevFrame, warpedPrev, H, frame.size());
+        }
         cv::absdiff(frame, warpedPrev, diffFrame);
 
         cv::Mat validMask(prevFrame.size(), CV_8UC1, cv::Scalar(255));
@@ -350,7 +380,13 @@ void Tracker::getFrame(const cv::Mat frame){
     // 4. Детекция объекта
     cv::Rect objectBBox = detectMovingObjectBBox(diffFrame, objectPts, minObjectArea);
 
+    #ifdef QT_DEBUG
     cv::Mat vis = drawVisualization(frame, backgroundPts, objectPts);
+    #else
+        // В release точки не рисуем, но bbox объекта - это результат работы
+        // алгоритма, а не отладочная информация, поэтому остаётся всегда
+        cv::Mat vis = frame.clone();
+    #endif
 
     if (objectBBox.area() > 0) {
         cv::rectangle(vis, objectBBox, cv::Scalar(0, 255, 255), 2);
@@ -380,6 +416,7 @@ void Tracker::getFrame(const cv::Mat frame){
     N++;
 }
 
+#ifdef QT_DEBUG
 cv::Mat Tracker::drawVisualization(const cv::Mat& frame,
                                     const std::vector<cv::Point2f>& backgroundPts,
                                     const std::vector<cv::Point2f>& objectPts) const
@@ -387,13 +424,14 @@ cv::Mat Tracker::drawVisualization(const cv::Mat& frame,
     cv::Mat vis = frame.clone();
 
     for (const auto& p : backgroundPts)
-        cv::circle(vis, p, 4, cv::Scalar(0, 255, 0), -1);
+        cv::circle(vis, p, 4, cv::Scalar(0, 255, 0), -1); // зелёный - фон
 
     for (const auto& p : objectPts)
-        cv::circle(vis, p, 4, cv::Scalar(0, 0, 255), -1);
+        cv::circle(vis, p, 4, cv::Scalar(0, 0, 255), -1); // красный - объект
 
     return vis;
 }
+#endif
 
 std::vector<cv::Point2f> Tracker::detectCorners(const cv::Mat& V)
 {
@@ -769,3 +807,33 @@ cv::Rect Tracker::warpBBox(const cv::Rect& bbox, const cv::Mat& H, const cv::Siz
     cv::Rect clipped = result & sane;
     return clipped.area() > 0 ? clipped : bbox;
 }  
+bool Tracker::isShadowPoint(const cv::Point2f& p, const cv::Mat& frameHSV, const cv::Mat& refHSV) const
+{
+    int x = cvRound(p.x), y = cvRound(p.y);
+    int r = shadowPatchRadius;
+    cv::Rect roi(x - r, y - r, 2 * r + 1, 2 * r + 1);
+    roi &= cv::Rect(0, 0, frameHSV.cols, frameHSV.rows);
+    if (roi.width <= 0 || roi.height <= 0) return false;
+
+    cv::Scalar meanFrame = cv::mean(frameHSV(roi));
+    cv::Scalar meanRef   = cv::mean(refHSV(roi));
+
+    float vFrame = meanFrame[2], vRef = meanRef[2];
+    if (vRef < 1.0f) return false; // эталон и так чёрный - тест бессмысленен
+
+    float valueRatio = vFrame / vRef;
+    if (valueRatio < shadowValueRatioMin || valueRatio > shadowValueRatioMax)
+        return false;
+
+    float satDelta = std::abs(meanFrame[1] - meanRef[1]);
+    if (satDelta > shadowSatDeltaMax)
+        return false;
+
+    // Hue в OpenCV - круговая величина 0..180 (градус/2)
+    float hueDelta = std::abs(meanFrame[0] - meanRef[0]);
+    hueDelta = std::min(hueDelta, 180.0f - hueDelta) * 2.0f;
+    if (hueDelta > shadowHueDeltaMaxDeg)
+        return false;
+
+    return true;
+}
