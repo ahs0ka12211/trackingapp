@@ -27,7 +27,7 @@ private:
     float shiTomasiThreshold;                   // коэфицент для отбора точек углов
     int minPointsToRedetect;                    // порог, ниже которого пере-детектируем углы
     int nmsRadius;                              // радиус подавления немаксимумов, в клетках сетки
-
+    
     // параметры детекции объекта по diff
     int diffThreshold = 25;      // порог бинаризации разностного кадра
     int minObjectArea = 500;     // минимальная площадь контура, чтобы не ловить шум
@@ -44,6 +44,16 @@ private:
 
     float centralZoneRatio;   // доля кадра (по каждой оси), которая используется для оценки H
 
+    float classificationZoneRatio;  // доля кадра, точки внутри которой можно классифицировать
+                                     // как "объект"; точки за её пределами (у самой рамки)
+                                     // всегда считаются фоном - там reprojection error
+                                     // естественно выше из-за дисторсии/параллакса,
+                                     // и жёсткий порог ransacReprojThreshold ошибочно
+                                     // помечает их как объект
+
+    int warpBorderErodePx;    // на сколько пикселей "сжимать" маску валидности warpPerspective,
+                               // чтобы не ловить полупрозрачные краевые артефакты интерполяции
+
     std::vector<cv::Point2f> detectCorners(const cv::Mat& frame); 
     std::vector<float> buildIntegralImage(const std::vector<float>& data, int width, int height); 
 
@@ -54,7 +64,7 @@ private:
     
     cv::Rect detectMovingObjectBBox(const cv::Mat& diffFrame, int minArea = 500);
 
-    bool isInCentralZone(const cv::Point2f& p, const cv::Size& frameSize) const;
+    bool isInCentralZone(const cv::Point2f& p, const cv::Size& frameSize, float zoneRatio) const;
 
 public:
     Tracker();    

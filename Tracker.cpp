@@ -9,6 +9,8 @@ Tracker::Tracker()
     nmsRadius = 2;    
     ransacReprojThreshold = 3.0f;
     centralZoneRatio = 0.7f; // используем центральные 70% кадра для оценки гомографии
+    classificationZoneRatio = 0.9f; // точки в приграничных 10% кадра всегда считаем фоном
+    warpBorderErodePx = 9;          // на сколько пикселей сжимать маску валидности warp'а
 
     qRegisterMetaType<cv::Mat>("cv::Mat"); // чтобы frameProcessed() работал через QueuedConnection
 } 
@@ -98,7 +100,7 @@ void Tracker::getFrame(const cv::Mat frame){
     for (size_t i = 0; i < prevGood.size(); i++) {
         // Зону проверяем по текущему кадру - именно в его системе
         // координат мы потом будем классифицировать точки
-        if (isInCentralZone(currGood[i], frame.size())) {
+        if (isInCentralZone(currGood[i], frame.size(), centralZoneRatio)) {
             prevCentral.push_back(prevGood[i]);
             currCentral.push_back(currGood[i]);
         }
@@ -136,6 +138,14 @@ void Tracker::getFrame(const cv::Mat frame){
             float err = static_cast<float>(cv::norm(currGood[i] - warpedPrev[i]));
             bool isBackground = err <= ransacReprojThreshold;
 
+            // У самой рамки кадра reprojection error естественно выше даже для
+            // настоящего фона (дисторсия объектива, параллакс, экстраполяция H
+            // за пределы зоны, по которой она считалась) - жёсткий порог там
+            // ошибочно принимает фон за объект. Поэтому такие точки всегда
+            // считаем фоном, не давая им "стать" ложным объектом.
+            if (!isInCentralZone(currGood[i], frame.size(), classificationZoneRatio))
+                isBackground = true;
+
             if (isBackground) backgroundPts.push_back(currGood[i]);
             else               objectPts.push_back(currGood[i]);
 
@@ -161,6 +171,19 @@ void Tracker::getFrame(const cv::Mat frame){
         cv::Mat warpedPrev;
         cv::warpPerspective(prevFrame, warpedPrev, H, frame.size());
         cv::absdiff(frame, warpedPrev, diffFrame);
+
+        // При панораме/зуме у warpedPrev по краям появляются зоны, для которых
+        // в prevFrame нет исходных данных - warpPerspective заливает их чёрным
+        // (BORDER_CONSTANT). absdiff с реальным содержимым текущего кадра в этих
+        // местах даёт огромный ложный diff, который detectMovingObjectBBox
+        // потом принимает за объект. Строим маску валидности тем же H и
+        // обнуляем diff там, где реальных данных нет.
+        cv::Mat validMask(prevFrame.size(), CV_8UC1, cv::Scalar(255));
+        cv::warpPerspective(validMask, validMask, H, frame.size());
+        cv::erode(validMask, validMask,
+                  cv::getStructuringElement(cv::MORPH_ELLIPSE,
+                      cv::Size(warpBorderErodePx, warpBorderErodePx)));
+        diffFrame.setTo(cv::Scalar::all(0), validMask == 0);
     }
 
     // ==========================================================
@@ -434,10 +457,10 @@ cv::Rect Tracker::detectMovingObjectBBox(const cv::Mat& diffFrame, int minArea)
     return bestRect; // (0,0,0,0), если ничего не нашли
 }
 
-bool Tracker::isInCentralZone(const cv::Point2f& p, const cv::Size& frameSize) const
+bool Tracker::isInCentralZone(const cv::Point2f& p, const cv::Size& frameSize, float zoneRatio) const
 {
-    float marginX = frameSize.width  * (1.0f - centralZoneRatio) / 2.0f;
-    float marginY = frameSize.height * (1.0f - centralZoneRatio) / 2.0f;
+    float marginX = frameSize.width  * (1.0f - zoneRatio) / 2.0f;
+    float marginY = frameSize.height * (1.0f - zoneRatio) / 2.0f;
 
     return p.x >= marginX && p.x <= frameSize.width  - marginX &&
            p.y >= marginY && p.y <= frameSize.height - marginY;
