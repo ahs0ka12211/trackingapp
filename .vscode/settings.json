@@ -1,5 +1,0 @@
-{
-    "terminal.integrated.env.windows": {
-        "PATH": "D:/UCHEBA/RADAR/QT/6.11.1/mingw_64/bin;${env:PATH}"
-    }
-}
