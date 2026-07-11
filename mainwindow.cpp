@@ -13,7 +13,9 @@ MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
     , cap()
     , videoLabel(nullptr)
-    , diffLabel(nullptr)
+    #ifdef QT_DEBUG
+        , diffLabel(nullptr)
+    #endif
     , btnOpen(nullptr)
     , btnPause(nullptr)
     , btnStartTracker(nullptr)
@@ -45,12 +47,14 @@ MainWindow::MainWindow(QWidget *parent)
     videoLabel->setStyleSheet("background-color: black;");
     layout->addWidget(videoLabel);
 
-    // Label для разностного кадра (diff)
-    diffLabel = new QLabel(this);
-    diffLabel->setAlignment(Qt::AlignCenter);
-    diffLabel->setMinimumSize(320, 240);
-    diffLabel->setStyleSheet("background-color: black;");
-    layout->addWidget(diffLabel);
+    #ifdef QT_DEBUG
+        // Label для разностного кадра (diff) - только для отладки
+        diffLabel = new QLabel(this);
+        diffLabel->setAlignment(Qt::AlignCenter);
+        diffLabel->setMinimumSize(320, 240);
+        diffLabel->setStyleSheet("background-color: black;");
+        layout->addWidget(diffLabel);
+    #endif
 
     // Слайдер
     QHBoxLayout *sliderLayout = new QHBoxLayout();
@@ -185,8 +189,10 @@ void MainWindow::openVideo()
     isTracking = false;
     btnStartTracker->setText("Запустить трекер");
     
-    // Очищаем diffLabel
-    diffLabel->clear();
+    #ifdef QT_DEBUG
+        // Очищаем diffLabel
+        diffLabel->clear();
+    #endif
 
     cap.open(path.toStdString());
 
@@ -234,8 +240,10 @@ void MainWindow::PauseVideo()
         isTracking = false;
         btnStartTracker->setText("Запустить трекер");
         
-        // Очищаем diffLabel
-        diffLabel->clear();
+        #ifdef QT_DEBUG
+            // Очищаем diffLabel
+            diffLabel->clear();
+        #endif
         
     } else {
         // При возобновлении синхронизируем слайдер с текущим кадром
@@ -262,8 +270,10 @@ void MainWindow::StartTracker()
         // ==========================================================
         emit resetTrackerSignal();
         
-        // Очищаем diffLabel
-        diffLabel->clear();
+        #ifdef QT_DEBUG
+            // Очищаем diffLabel
+            diffLabel->clear();
+        #endif
     }
 }
 
@@ -290,7 +300,10 @@ void MainWindow::updateFrame()
         emit resetTrackerSignal();
         isTracking = false;
         btnStartTracker->setText("Запустить трекер");
-        diffLabel->clear();
+
+        #ifdef QT_DEBUG
+            diffLabel->clear();
+        #endif
         
         return;
     }
@@ -360,25 +373,28 @@ void MainWindow::onFrameProcessed(cv::Mat visFrame, cv::Mat diffFrame)
     // ==========================================================
     // ОТОБРАЖЕНИЕ РАЗНОСТНОГО КАДРА (DIFF)
     // ==========================================================
-    
-    if (!diffFrame.empty()) {
-        cv::Mat diffColor;
-        
-        // Если diffFrame одноканальный (grayscale) - конвертим в цветной
-        if (diffFrame.channels() == 1) {
-            cv::cvtColor(diffFrame, diffColor, cv::COLOR_GRAY2BGR);
-        } else {
-            diffColor = diffFrame.clone();
+    #ifdef QT_DEBUG
+        if (!diffFrame.empty()) {
+            cv::Mat diffColor;
+            
+            // Если diffFrame одноканальный (grayscale) - конвертим в цветной
+            if (diffFrame.channels() == 1) {
+                cv::cvtColor(diffFrame, diffColor, cv::COLOR_GRAY2BGR);
+            } else {
+                diffColor = diffFrame.clone();
+            }
+            
+            // Конвертим BGR -> RGB для Qt
+            cv::Mat rgbDiff;
+            cv::cvtColor(diffColor, rgbDiff, cv::COLOR_BGR2RGB);
+            QImage qimgDiff(rgbDiff.data, rgbDiff.cols, rgbDiff.rows, 
+                            rgbDiff.step, QImage::Format_RGB888);
+            diffLabel->setPixmap(QPixmap::fromImage(qimgDiff).scaled(
+                diffLabel->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
         }
-        
-        // Конвертим BGR -> RGB для Qt
-        cv::Mat rgbDiff;
-        cv::cvtColor(diffColor, rgbDiff, cv::COLOR_BGR2RGB);
-        QImage qimgDiff(rgbDiff.data, rgbDiff.cols, rgbDiff.rows, 
-                        rgbDiff.step, QImage::Format_RGB888);
-        diffLabel->setPixmap(QPixmap::fromImage(qimgDiff).scaled(
-            diffLabel->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
-    }
+    #else
+        Q_UNUSED(diffFrame);
+    #endif
 }
 
 // ==========================================================
@@ -399,8 +415,10 @@ void MainWindow::onSliderMoved(int value)
     isTracking = false;
     btnStartTracker->setText("Запустить трекер");
     
-    // Очищаем diffLabel
-    diffLabel->clear();
+    #ifdef QT_DEBUG
+        // Очищаем diffLabel
+        diffLabel->clear();
+    #endif
     
     // Устанавливаем позицию в видео
     cap.set(cv::CAP_PROP_POS_FRAMES, value);

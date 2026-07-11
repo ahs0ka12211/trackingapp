@@ -308,7 +308,13 @@ void Tracker::getFrame(const cv::Mat frame){
     // 4. Детекция объекта
     cv::Rect objectBBox = detectMovingObjectBBox(diffFrame, objectPts, minObjectArea);
 
+    #ifdef QT_DEBUG
     cv::Mat vis = drawVisualization(frame, backgroundPts, objectPts);
+    #else
+        // В release точки не рисуем, но bbox объекта - это результат работы
+        // алгоритма, а не отладочная информация, поэтому остаётся всегда
+        cv::Mat vis = frame.clone();
+    #endif
 
     if (objectBBox.area() > 0) {
         cv::rectangle(vis, objectBBox, cv::Scalar(0, 255, 255), 2);
@@ -338,6 +344,7 @@ void Tracker::getFrame(const cv::Mat frame){
     N++;
 }
 
+#ifdef QT_DEBUG
 cv::Mat Tracker::drawVisualization(const cv::Mat& frame,
                                     const std::vector<cv::Point2f>& backgroundPts,
                                     const std::vector<cv::Point2f>& objectPts) const
@@ -345,13 +352,14 @@ cv::Mat Tracker::drawVisualization(const cv::Mat& frame,
     cv::Mat vis = frame.clone();
 
     for (const auto& p : backgroundPts)
-        cv::circle(vis, p, 4, cv::Scalar(0, 255, 0), -1);
+        cv::circle(vis, p, 4, cv::Scalar(0, 255, 0), -1); // зелёный - фон
 
     for (const auto& p : objectPts)
-        cv::circle(vis, p, 4, cv::Scalar(0, 0, 255), -1);
+        cv::circle(vis, p, 4, cv::Scalar(0, 0, 255), -1); // красный - объект
 
     return vis;
 }
+#endif
 
 std::vector<cv::Point2f> Tracker::detectCorners(const cv::Mat& V)
 {

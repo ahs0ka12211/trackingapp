@@ -87,9 +87,14 @@ private:
     std::vector<cv::Point2f> detectCorners(const cv::Mat& V);
     std::vector<float> buildIntegralImage(const std::vector<float>& data, int width, int height); 
 
+    #ifdef QT_DEBUG
+    // Отрисовка кадра: зелёные точки - фон, красные - объект.
+    // Существует только в debug-сборке - в release не нужна для работы
+    // алгоритма, только для визуальной отладки.
     cv::Mat drawVisualization(const cv::Mat& frame,
                                const std::vector<cv::Point2f>& backgroundPts,
                                const std::vector<cv::Point2f>& objectPts) const;
+    #endif
     
     cv::Rect detectMovingObjectBBox(const cv::Mat& diffFrame, 
                                     const std::vector<cv::Point2f>& objectFeaturePts,

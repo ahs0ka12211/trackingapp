@@ -39,7 +39,9 @@ private:
     cv::VideoCapture cap;
     
     QLabel *videoLabel;
-    QLabel *diffLabel;
+    #ifdef QT_DEBUG
+        QLabel *diffLabel;
+    #endif
     QPushButton *btnOpen;
     QPushButton *btnPause;
     QPushButton *btnStartTracker;
