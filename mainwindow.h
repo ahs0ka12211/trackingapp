@@ -25,9 +25,11 @@ public slots:
     void onSliderMoved(int value);
     void StartTracker();
     void onFrameProcessed(cv::Mat visFrame, cv::Mat diffFrame);
+    void resetTracker();  // НОВЫЙ СЛОТ
 
 signals:
-    void sendFrame(cv::Mat frame);  // Сигнал для отправки кадра в трекер
+    void sendFrame(cv::Mat frame);
+    void resetTrackerSignal();  // НОВЫЙ СИГНАЛ
 
 private:
     void showFrame(const cv::Mat& frame);
@@ -53,4 +55,4 @@ private:
     bool isSliderUpdating;
 };
 
-#endif // MAINWINDOW_H
+#endif 

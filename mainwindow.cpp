@@ -87,6 +87,10 @@ MainWindow::MainWindow(QWidget *parent)
     connect(this, &MainWindow::sendFrame, 
             tracker, &Tracker::getFrame, Qt::QueuedConnection);
     
+    // ПОДКЛЮЧАЕМ СИГНАЛ СБРОСА ТРЕКЕРА
+    connect(this, &MainWindow::resetTrackerSignal,
+            this, &MainWindow::resetTracker, Qt::QueuedConnection);
+    
     // Запускаем поток трекера
     trackerThread->start();
 
@@ -122,6 +126,33 @@ MainWindow::~MainWindow()
 }
 
 // ==========================================================
+// 3.5. СБРОС ТРЕКЕРА (НОВЫЙ МЕТОД)
+// ==========================================================
+
+void MainWindow::resetTracker()
+{
+    if (!tracker) return;
+    
+    // Создаем новый трекер (старый удалится автоматически)
+    // Но проще пересоздать объект в потоке
+    
+    // Останавливаем текущий трекер
+    tracker->deleteLater();
+    
+    // Создаем новый
+    tracker = new Tracker();
+    tracker->moveToThread(trackerThread);
+    
+    // Переподключаем сигналы
+    connect(tracker, &Tracker::frameProcessed, 
+            this, &MainWindow::onFrameProcessed);
+    connect(this, &MainWindow::sendFrame, 
+            tracker, &Tracker::getFrame, Qt::QueuedConnection);
+    
+    qDebug() << "[MainWindow] Трекер сброшен до изначального состояния";
+}
+
+// ==========================================================
 // 4. ОТКРЫТИЕ ВИДЕО
 // ==========================================================
 
@@ -144,6 +175,18 @@ void MainWindow::openVideo()
         cap.release();
         timer->stop();
     }
+
+    // ==========================================================
+    // СБРОС ТРЕКЕРА ПРИ ОТКРЫТИИ НОВОГО ВИДЕО
+    // ==========================================================
+    emit resetTrackerSignal();
+    
+    // Сбрасываем состояние трекера в UI
+    isTracking = false;
+    btnStartTracker->setText("Запустить трекер");
+    
+    // Очищаем diffLabel
+    diffLabel->clear();
 
     cap.open(path.toStdString());
 
@@ -168,10 +211,6 @@ void MainWindow::openVideo()
     videoSlider->setEnabled(true);
     videoSlider->setValue(0);
 
-    // Сбрасываем состояние трекера
-    isTracking = false;
-    btnStartTracker->setText("Запустить трекер");
-
     // Запускаем воспроизведение
     timer->start(1000 / fps);
 }
@@ -185,6 +224,19 @@ void MainWindow::PauseVideo()
     if (timer->isActive()) {
         timer->stop();
         btnPause->setText("Продолжить");
+        
+        // ==========================================================
+        // СБРОС ТРЕКЕРА ПРИ ПАУЗЕ
+        // ==========================================================
+        emit resetTrackerSignal();
+        
+        // Сбрасываем состояние трекера в UI
+        isTracking = false;
+        btnStartTracker->setText("Запустить трекер");
+        
+        // Очищаем diffLabel
+        diffLabel->clear();
+        
     } else {
         // При возобновлении синхронизируем слайдер с текущим кадром
         int currentFrame = static_cast<int>(cap.get(cv::CAP_PROP_POS_FRAMES));
@@ -204,6 +256,14 @@ void MainWindow::StartTracker()
     } else {
         btnStartTracker->setText("Запустить трекер");
         qDebug() << "Трекер ОСТАНОВЛЕН";
+        
+        // ==========================================================
+        // СБРОС ТРЕКЕРА ПРИ ОСТАНОВКЕ
+        // ==========================================================
+        emit resetTrackerSignal();
+        
+        // Очищаем diffLabel
+        diffLabel->clear();
     }
 }
 
@@ -223,6 +283,15 @@ void MainWindow::updateFrame()
     if (frame.empty()) {
         timer->stop();
         qDebug() << "Видео закончилось";
+        
+        // ==========================================================
+        // СБРОС ТРЕКЕРА ПРИ ЗАВЕРШЕНИИ ВИДЕО
+        // ==========================================================
+        emit resetTrackerSignal();
+        isTracking = false;
+        btnStartTracker->setText("Запустить трекер");
+        diffLabel->clear();
+        
         return;
     }
     
@@ -320,6 +389,18 @@ void MainWindow::onSliderMoved(int value)
 {
     if (isSliderUpdating) return;
     if (!cap.isOpened()) return;
+    
+    // ==========================================================
+    // СБРОС ТРЕКЕРА ПРИ ПЕРЕМОТКЕ
+    // ==========================================================
+    emit resetTrackerSignal();
+    
+    // Сбрасываем состояние трекера в UI
+    isTracking = false;
+    btnStartTracker->setText("Запустить трекер");
+    
+    // Очищаем diffLabel
+    diffLabel->clear();
     
     // Устанавливаем позицию в видео
     cap.set(cv::CAP_PROP_POS_FRAMES, value);
