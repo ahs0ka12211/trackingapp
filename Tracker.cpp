@@ -164,10 +164,19 @@ void Tracker::getFrame(const cv::Mat frame){
     std::vector<uchar> survivedStatus;
     std::vector<cv::Point2f> survivedAnchor;
 
+    // Полный варп предыдущего кадра - нужен и для HSV-теста тени (ниже, в
+    // цикле классификации), и для diff (шаг 3). Объявляем здесь, на уровне
+    // функции, чтобы не считать warpPerspective дважды.
+    cv::Mat warpedPrevImg;
+
     if (!Hnew.empty()) {
         H = Hnew;
 
-        std::vector<cv::Point2f> warpedPrev;
+        cv::warpPerspective(prevFrame, warpedPrevImg, H, frame.size());
+        cv::Mat warpedPrevHSV;
+        cv::cvtColor(warpedPrevImg, warpedPrevHSV, cv::COLOR_BGR2HSV);
+
+        std::vector<cv::Point2f> warpedPrev; // это ТОЧКИ (не картинка) - имя как было
         cv::perspectiveTransform(prevGood, warpedPrev, H);
 
         float cameraMotion = cv::norm(H - cv::Mat::eye(3,3,CV_64F), cv::NORM_L2);
@@ -175,6 +184,23 @@ void Tracker::getFrame(const cv::Mat frame){
         survivedAnchor.reserve(currGood.size());
 
         for (size_t i = 0; i < currGood.size(); i++) {
+
+            // ====================== ФИЛЬТР ТЕНЕЙ ======================
+            // Тень "приклеена" к движущемуся объекту и трекается вместе с
+            // ним, но физически не является ни фоном, ни объектом - не
+            // должна ни портить гомографию, ни раздувать bbox объекта.
+            // Сравниваем HSV текущего пикселя с HSV того же места на
+            // warpedPrev (это и есть наш "эталон, каким пиксель должен
+            // быть без независимого движения"): тень не меняет тон и
+            // насыщенность поверхности, только её яркость - и не до нуля.
+            if (isShadowPoint(currGood[i], frameHSV, warpedPrevHSV)) {
+                survivedCorners.push_back(currGood[i]);
+                survivedStatus.push_back(1); // трекаем дальше как фон, но не используем как улику
+                survivedAnchor.push_back(anchorGood[i]);
+                continue; // не в backgroundPts, не в objectPts
+            }
+            // ============================================================
+
             float err = static_cast<float>(cv::norm(currGood[i] - warpedPrev[i]));
             bool isBackground = err <= ransacReprojThreshold;
 
@@ -238,7 +264,11 @@ void Tracker::getFrame(const cv::Mat frame){
     cv::Mat diffFrame = cv::Mat::zeros(frame.size(), frame.type());
     if (!H.empty() && !prevFrame.empty()) {
         cv::Mat warpedPrev;
-        cv::warpPerspective(prevFrame, warpedPrev, H, frame.size());
+        if (!warpedPrevImg.empty()) {
+            warpedPrev = warpedPrevImg; // уже посчитан выше для теста тени - не дублируем
+        } else {
+            cv::warpPerspective(prevFrame, warpedPrev, H, frame.size());
+        }
         cv::absdiff(frame, warpedPrev, diffFrame);
 
         cv::Mat validMask(prevFrame.size(), CV_8UC1, cv::Scalar(255));
@@ -612,4 +642,35 @@ bool Tracker::isNearLastObject(const cv::Point2f& p, float margin) const
     expanded.width += static_cast<int>(margin * 2);
     expanded.height += static_cast<int>(margin * 2);
     return expanded.contains(cv::Point(cvRound(p.x), cvRound(p.y)));
+}
+
+bool Tracker::isShadowPoint(const cv::Point2f& p, const cv::Mat& frameHSV, const cv::Mat& refHSV) const
+{
+    int x = cvRound(p.x), y = cvRound(p.y);
+    int r = shadowPatchRadius;
+    cv::Rect roi(x - r, y - r, 2 * r + 1, 2 * r + 1);
+    roi &= cv::Rect(0, 0, frameHSV.cols, frameHSV.rows);
+    if (roi.width <= 0 || roi.height <= 0) return false;
+
+    cv::Scalar meanFrame = cv::mean(frameHSV(roi));
+    cv::Scalar meanRef   = cv::mean(refHSV(roi));
+
+    float vFrame = meanFrame[2], vRef = meanRef[2];
+    if (vRef < 1.0f) return false; // эталон и так чёрный - тест бессмысленен
+
+    float valueRatio = vFrame / vRef;
+    if (valueRatio < shadowValueRatioMin || valueRatio > shadowValueRatioMax)
+        return false;
+
+    float satDelta = std::abs(meanFrame[1] - meanRef[1]);
+    if (satDelta > shadowSatDeltaMax)
+        return false;
+
+    // Hue в OpenCV - круговая величина 0..180 (градус/2)
+    float hueDelta = std::abs(meanFrame[0] - meanRef[0]);
+    hueDelta = std::min(hueDelta, 180.0f - hueDelta) * 2.0f;
+    if (hueDelta > shadowHueDeltaMaxDeg)
+        return false;
+
+    return true;
 }

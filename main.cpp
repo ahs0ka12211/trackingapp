@@ -3,6 +3,7 @@
 
 int main(int argc, char *argv[])
 {
+    setlocale(LC_ALL, "Russian");
     QApplication app(argc, argv);
     
     // Регистрируем cv::Mat для передачи между потоками через сигналы/слоты

@@ -76,6 +76,12 @@ private:
     float radialBoostMaxCameraMotion = 14.0f;
     float minRadialMotionLen = 0.28f;
 
+    int shadowPatchRadius = 3;
+    float shadowValueRatioMin = 0.25f;   // темнее этого - не тень, а что-то другое
+    float shadowValueRatioMax = 0.90f;   // светлее этого - разницы почти нет, не тень
+    float shadowSatDeltaMax = 40.0f;     // макс. допустимое изменение насыщенности (0..255)
+    float shadowHueDeltaMaxDeg = 20.0f;  // макс. допустимое изменение тона, в градусах
+
     double lastKnownArea = 0.0;
 
     std::vector<cv::Point2f> detectCorners(const cv::Mat& V);
@@ -91,6 +97,7 @@ private:
 
     bool isInCentralZone(const cv::Point2f& p, const cv::Size& frameSize, float zoneRatio) const;
     bool isNearLastObject(const cv::Point2f& p, float margin = 60.0f) const;
+    bool isShadowPoint(const cv::Point2f& p, const cv::Mat& frameHSV, const cv::Mat& refHSV) const;
 
 public:
     Tracker();    
