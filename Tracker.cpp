@@ -77,42 +77,76 @@ std::vector<float> Tracker::buildIntegralImage(const std::vector<float>& data, i
     return integral;
 }
 
+
+// Сердце трекера, здесь вызывается последовательность методов 
+// каждый из которых выполняет свою роль, образуя цельный алгоритм трекера
 void Tracker::getFrame(const cv::Mat frame){
  
+    // Получение из RGB изображения, изображение в формате HSV
+    // где исользуется канал V (тон/насыщенность цвета)
     cv::Mat frameHSV;
     cv::cvtColor(frame, frameHSV, cv::COLOR_BGR2HSV);
     std::vector<cv::Mat> channels;
     cv::split(frameHSV, channels);
     cv::Mat V = channels[2];
 
+    //===========================================
+    // (1) Первый кадр  
+    //===========================================
+    // На первом кадре осуществляется поиск угловых точек ( края объектов на кадре)
+    // Также инициализируются якорные точки (зафиксированные во времени угловые точки,
+    // что полезно при окклюзиях (объект закрыли на пару кадров) или при медленном движении,
+    // когда точка может выйти за пределы окна поиска
     if (N == 0) {
-        trackedCorners = detectCorners(V);
-        pointStatus.assign(trackedCorners.size(), 1);
-        anchorCorners = trackedCorners;
-        framesSinceAnchor = 0;
-        prevGray = V.clone();
-        prevFrame = frame.clone();
-        H = cv::Mat::eye(3, 3, CV_64F);
-        N++;
+        trackedCorners = detectCorners(V);                  // Получение угловых точек 
+        pointStatus.assign(trackedCorners.size(), 1);       // Инициализируем статус углоых точек единицами (принадлежат к фону)
+        anchorCorners = trackedCorners;                     // Изначально все угловые точки являются якорными
+        framesSinceAnchor = 0;                              // Кол-во кадров с объявления якорных точек
+
+        prevGray = V.clone();                               // Сохраняем предыдущий кадр (канал V из HSV)
+        prevFrame = frame.clone();                          // Также сохраняем предыдущий кадр (формат RGB)
+
+        H = cv::Mat::eye(3, 3, CV_64F);                     // Матрица гомографии
+        N++;                                                // Счетчик текущего кадра
         return;
     }
 
-    // 1. Optical Flow
+    //===========================================
+    // (2) Оптический поток (смещение угловых точек)
+    //===========================================
+    // Нахождение смещения угловых точек на следующем кадре 
+    // Благодаря perspectiveTransform предсказывается смещение
+    // угловых точек на основе гомографии
     std::vector<cv::Point2f> nextPts;
     std::vector<uchar> lkStatus;
     std::vector<float> lkErr;
 
     if (!trackedCorners.empty()) {
-        int lkFlags = 0;
+        
+        // Флаги для алгоритма Лукаса-Канаде, которые управляют тем, 
+        // как именно алгоритм начинает искать смещение точек на новом кадре
+        int lkFlags = 0;    // 0 = Поиск смещения уловых точек осуществляется со старых позиций точек (без предсказания)
 
+        // Если была рассчитана гомография, то задаем параметры алгоритма (lkFlags)
+        // основанные на предсказании гомографии. 
+        // Это позволяет искать смещения точек на ее основе
         if (!H.empty()) {
+            // nextPts – предсказанные координаты угловых точек на следующем кадре
             cv::perspectiveTransform(trackedCorners, nextPts, H);
             lkFlags = cv::OPTFLOW_USE_INITIAL_FLOW;
         }
 
+        // Вычисление изменение гомографии относительно единичной матрицы (отсутствие движения)
         float cameraMotionEst = cv::norm(H - cv::Mat::eye(3,3,CV_64F), cv::NORM_L2);
+
+        // Вычисление уровней пирамиды
+        // (Так как алгоритм видит смещение точек только в очень малом радиусе,
+        // используется пирамидальное сжатие кадра, для поиска смещения точек в большем радиусе пикселей  
         int maxLevel = (cameraMotionEst > 12.0f) ? 5 : 4;
 
+        // Библиотечная функция определения смещения точек на соседних кадрах
+        // Если lkFlags не заданы ( =0), то поиск начинается со старой позиции (trackedCorners)
+        // Если lkFlags = OPTFLOW_USE_INITIAL_FLOW, то поиск начинается с предсказанной позиции (nextPts)
         cv::calcOpticalFlowPyrLK(
             prevGray, V, trackedCorners, nextPts, lkStatus, lkErr,
             cv::Size(21, 21), maxLevel,
@@ -121,6 +155,9 @@ void Tracker::getFrame(const cv::Mat frame){
         );
     }
 
+    // prevGood – успешно отслеженные точки с предыдущего кадра
+    // currGood – соответствующие им точки на новом кадре
+    // anchorGood – якорные точки, соответствующие успешно остлеженным
     std::vector<cv::Point2f> prevGood, currGood, anchorGood;
     for (size_t i = 0; i < nextPts.size(); i++) {
         if (lkStatus[i]) {
@@ -129,8 +166,14 @@ void Tracker::getFrame(const cv::Mat frame){
             anchorGood.push_back(anchorCorners[i]);
         }
     }
-
-    // 1.5. Длинная база (anchor)
+ 
+    //==================================
+    // Якорный трекинг
+    //==================================
+    // Если прошло заданное кол-во кадров с объявления якорных точек,
+    // то гомография рассчитывается не между соседними кадрами,
+    // а между текущим и "якорным" кадрами
+    // Используется параметр RANSAC, котрый отсекает шумовые точки 
     framesSinceAnchor++;
 
     cv::Mat Hanchor;
@@ -142,6 +185,8 @@ void Tracker::getFrame(const cv::Mat frame){
         haveAnchorH = !Hanchor.empty();
     }
 
+    // Проецирование якорных точек
+    // (по рассчитанной гомографии происходит проецирование якорных точек на текущий кадр) 
     std::vector<cv::Point2f> warpedAnchor;
     if (haveAnchorH)
         cv::perspectiveTransform(anchorGood, warpedAnchor, Hanchor);
