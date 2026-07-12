@@ -427,6 +427,7 @@ void Tracker::getFrame(const cv::Mat frame){
     }
 
     // Переклассификация по тени
+    // Проверяем все точки, классифицированные как объект, и проверяем не являются ли они тенью
     if (!shadowMask.empty()) {
         for (size_t i = 0; i < survivedCorners.size(); i++) {
             if (survivedStatus[i] == 0) {
@@ -435,11 +436,12 @@ void Tracker::getFrame(const cv::Mat frame){
                 int y = cvRound(pt.y);
                 if (x >= 0 && y >= 0 && x < shadowMask.cols && y < shadowMask.rows &&
                     shadowMask.at<uchar>(y, x) > 0) {
-                    survivedStatus[i] = 1;
+                    survivedStatus[i] = 1; // Теперь классифицируем как фон
                 }
             }
         }
 
+        // Обновляем содержимое backgroundPts и objectPts после проверки по маске теней
         backgroundPts.clear();
         objectPts.clear();
         for (size_t i = 0; i < survivedCorners.size(); i++) {
@@ -450,24 +452,31 @@ void Tracker::getFrame(const cv::Mat frame){
 
     // Усиление diff feature points объекта
     if (!objectPts.empty()) {
+        // Маска точек объекта
         cv::Mat pointsMask = cv::Mat::zeros(diffFrame.size(), CV_8U);
         for (const auto& pt : objectPts) {
             int x = cvRound(pt.x);
             int y = cvRound(pt.y);
             if (x >= 0 && x < pointsMask.cols && y >= 0 && y < pointsMask.rows) {
+                // Рисуем в маске белые круги 7x7 пикселей, вокруг каждой угловой точки объекта
+                // Таким образом получаем объект полностью залитый белым
                 cv::circle(pointsMask, cv::Point(x, y), 7, cv::Scalar(255), -1);
             }
         }
+        // Расширение маски в 3 раза, для полной заливки объекта
         cv::dilate(pointsMask, pointsMask, cv::Mat(), cv::Point(-1,-1), 3);
         
+        // Переводим difframe в черное-белое изображение
         cv::Mat grayDiff;
         if (diffFrame.channels() == 3)
             cv::cvtColor(diffFrame, grayDiff, cv::COLOR_BGR2GRAY);
         else
             grayDiff = diffFrame;
         
+        // Приминение маски к grayDiff, для выделения объекта белым
         cv::bitwise_or(grayDiff, pointsMask, grayDiff);
         if (diffFrame.channels() == 3) {
+            // Перевод обратно в RGB
             cv::cvtColor(grayDiff, diffFrame, cv::COLOR_GRAY2BGR);
         } else {
             diffFrame = grayDiff;
@@ -475,10 +484,12 @@ void Tracker::getFrame(const cv::Mat frame){
     }
 
     // 4. Детекция объекта
+    // Получение objectBBox (прямоугольника для обводки объекта)
     cv::Rect objectBBox = detectMovingObjectBBox(diffFrame, objectPts, minObjectArea);
 
     #ifdef QT_DEBUG
-    cv::Mat vis = drawVisualization(frame, backgroundPts, objectPts);
+        // Отрисовка угловых точек в окне видеоплеера
+        cv::Mat vis = drawVisualization(frame, backgroundPts, objectPts);
     #else
         // В release точки не рисуем, но bbox объекта - это результат работы
         // алгоритма, а не отладочная информация, поэтому остаётся всегда
@@ -486,9 +497,11 @@ void Tracker::getFrame(const cv::Mat frame){
     #endif
 
     if (objectBBox.area() > 0) {
+        // Создание желтого прямоугольника вокруг объетка на текущем кадре
         cv::rectangle(vis, objectBBox, cv::Scalar(0, 255, 255), 2);
     }
 
+    // Сигнал, который отправляется в mainwindow, для отрисовки рассчитанных кадров (vis и diffFrame)
     emit frameProcessed(vis, diffFrame);
 
     // 5. Обновление состояния
@@ -496,17 +509,21 @@ void Tracker::getFrame(const cv::Mat frame){
     pointStatus = survivedStatus;
     anchorCorners = survivedAnchor;
 
+    // Обновление информации об угловых точках (раз в 25 кадров или если осталось мало угловых точек)
     if (N % 25 == 0 || (int)trackedCorners.size() < minPointsToRedetect) {
         trackedCorners = detectCorners(V);
         pointStatus.assign(trackedCorners.size(), 1);
+        // Обновление якорей (сейчас опять все угловые точки - якоря, как и на первом кадре)
         anchorCorners = trackedCorners;
         framesSinceAnchor = 0;
     }
     else if (framesSinceAnchor >= (cameraMotion > 9.0f ? 6 : anchorRefreshInterval)) {
+        // Обновление якорей если прошло достаточно кадров
         anchorCorners = trackedCorners;
         framesSinceAnchor = 0;
     }
 
+    // Сохранение информации о текущем кадре (для передачи на следующий вызов как предыдущий)
     prevGray = V.clone();
     prevFrame = frame.clone();
 
