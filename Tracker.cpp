@@ -20,6 +20,7 @@ Tracker::Tracker()
     qRegisterMetaType<cv::Mat>("cv::Mat");
 }
 
+// Функция для установки шага сетки
 void Tracker::setGridStep(int step_)
 {
     if (step_ < 1) step_ = 1;
@@ -27,6 +28,7 @@ void Tracker::setGridStep(int step_)
     recalcStepDependentParams();
 }
 
+// Рассчет параметров в зависимости от шага сетки
 void Tracker::recalcStepDependentParams()
 {
     float scale = static_cast<float>(kBaseStep) / static_cast<float>(step);
@@ -51,6 +53,7 @@ void Tracker::recalcStepDependentParams()
              << ", minPointsToRedetect =" << minPointsToRedetect;
 }
 
+// Установка параметров трекера
 void Tracker::setDetectionParams(int diffThreshold_, int minObjectArea_,
                                   int openKernelSize_, int closeKernelSize_)
 {
@@ -531,6 +534,7 @@ void Tracker::getFrame(const cv::Mat frame){
 }
 
 #ifdef QT_DEBUG
+// Функция для отрисовки угловых точек на кадре и выделение их цветом
 cv::Mat Tracker::drawVisualization(const cv::Mat& frame,
                                     const std::vector<cv::Point2f>& backgroundPts,
                                     const std::vector<cv::Point2f>& objectPts) const
@@ -547,6 +551,7 @@ cv::Mat Tracker::drawVisualization(const cv::Mat& frame,
 }
 #endif
 
+// Функция для поиска угловых точек
 std::vector<cv::Point2f> Tracker::detectCorners(const cv::Mat& V)
 {
     int widthMAP = (V.size().width - step - 1) / step;
@@ -658,13 +663,14 @@ std::vector<cv::Point2f> Tracker::detectCorners(const cv::Mat& V)
     return corners;
 }
 
-// ====================== detectMovingObjectBBox ======================
+// Поиск координат BBox для последующей обводки объекта
 cv::Rect Tracker::detectMovingObjectBBox(const cv::Mat& diffFrame, 
                                          const std::vector<cv::Point2f>& objectFeaturePts,
                                          int minArea)
 {
     if (diffFrame.empty()) return cv::Rect();
 
+    // Перевод diffFrame в черно-беллое изображение
     cv::Mat gray;
     if (diffFrame.channels() == 3)
         cv::cvtColor(diffFrame, gray, cv::COLOR_BGR2GRAY);
