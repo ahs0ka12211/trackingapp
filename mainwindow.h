@@ -25,11 +25,11 @@ public slots:
     void onSliderMoved(int value);
     void StartTracker();
     void onFrameProcessed(cv::Mat visFrame, cv::Mat diffFrame);
-    void resetTracker();  // НОВЫЙ СЛОТ
+    void resetTracker();
 
 signals:
     void sendFrame(cv::Mat frame);
-    void resetTrackerSignal();  // НОВЫЙ СИГНАЛ
+    void resetTrackerSignal();
 
 private:
     void showFrame(const cv::Mat& frame);

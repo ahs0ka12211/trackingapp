@@ -680,7 +680,6 @@ cv::Rect Tracker::detectMovingObjectBBox(const cv::Mat& diffFrame,
     cv::Mat mask;
     cv::threshold(gray, mask, diffThreshold, 255, cv::THRESH_BINARY);
 
-    // Motion Evidence
     if (motionEvidence.empty() || motionEvidence.size() != gray.size()) {
         motionEvidence = cv::Mat::zeros(gray.size(), CV_32F);
     }
@@ -709,7 +708,6 @@ cv::Rect Tracker::detectMovingObjectBBox(const cv::Mat& diffFrame,
         cv::morphologyEx(mask, mask, cv::MORPH_CLOSE, kernelClose);
     }
 
-    // Feature points boost
     if (!objectFeaturePts.empty()) {
         cv::Mat featMask = cv::Mat::zeros(mask.size(), CV_8U);
         for (const auto& pt : objectFeaturePts) {
@@ -823,7 +821,6 @@ cv::Rect Tracker::detectMovingObjectBBox(const cv::Mat& diffFrame,
     return cv::Rect();
 }
 
-// ====================== computeShadowMask ======================
 cv::Mat Tracker::computeShadowMask(const cv::Mat& currFrame, const cv::Mat& bgFrame) const
 {
     if (currFrame.empty() || bgFrame.empty() || currFrame.size() != bgFrame.size())

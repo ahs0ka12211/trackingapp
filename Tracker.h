@@ -25,7 +25,7 @@ private:
     static constexpr int kBaseStep = 5;
     static constexpr int kBaseWindowSize = 7;
     static constexpr int kBaseNmsRadius = 2;
-    static constexpr int kBaseMinPointsToRedetect = 35;  // чуть повысили
+    static constexpr int kBaseMinPointsToRedetect = 35;
 
     void recalcStepDependentParams();
     
@@ -39,7 +39,7 @@ private:
     cv::Rect lastObjectBBox;
     bool hasLastObject = false;
     int missedFrames = 0;
-    int maxMissedFrames = 18;           // чуть увеличил терпимость
+    int maxMissedFrames = 18;
     float centerBiasRadiusRatio = 0.32f;
 
     float ransacReprojThreshold = 3.0f;
@@ -72,13 +72,13 @@ private:
 
     float centralZoneRatio = 0.68f;
     float classificationZoneRatio = 0.88f;
-    int warpBorderErodePx = 12;         // чуть увеличил
+    int warpBorderErodePx = 12; 
 
     // Радиальный буст
     bool useRadialBoost = true;
     float radialMotionThreshold = 0.57f;
     float radialBoostMaxCameraMotion = 15.0f;
-    float minRadialMotionLen = 0.25f;   // чуть ослабил
+    float minRadialMotionLen = 0.25f;
 
     int shadowPatchRadius = 3;
     float shadowValueRatioMin = 0.25f;   // темнее этого - не тень, а что-то другое
