@@ -191,10 +191,17 @@ void Tracker::getFrame(const cv::Mat frame){
     if (haveAnchorH)
         cv::perspectiveTransform(anchorGood, warpedAnchor, Hanchor);
 
+    // Адаптивный порог ( для отсекания мусора)
+    // Рассчитывается на основе пройденного кол-ва кадров с определения якорных точек
     float anchorThresh = anchorBaseReprojThreshold *
                           (1.0f + 0.25f * std::sqrt(static_cast<float>(framesSinceAnchor)));
 
-    // 2. Гомография фона (улучшенная)
+    //======================================
+    // (3) Гомография фона 
+    //======================================
+    
+    // Выбор точек в центральной зоне (60%)
+    // (отсечение краев кадра, так как кравые точки часто искажаются из-за дисторсии объектива)
     std::vector<cv::Point2f> prevCentral, currCentral;
     for (size_t i = 0; i < prevGood.size(); i++) {
         if (isInCentralZone(currGood[i], frame.size(), centralZoneRatio)) {
@@ -203,7 +210,8 @@ void Tracker::getFrame(const cv::Mat frame){
         }
     }
 
-    // Очистка от области объекта
+    // Редукция(сокращение) точек вокруг объекта, так как они мешают вычислять гомографию фона
+    // (опрлеленная область объекта может быть меньше истинной, тень также может мешать вычислению гомографии фона)
     if (hasLastObject && !lastObjectBBox.empty()) {
         cv::Rect forbidden = lastObjectBBox;
         forbidden.x -= 50;
@@ -218,81 +226,112 @@ void Tracker::getFrame(const cv::Mat frame){
                 cc.push_back(currCentral[i]);
             }
         }
+
+        // Для вычисление гомографии нужно минимум 4 точки( для RANSAC лучше >= 6)
         if (pc.size() >= 6) {
             prevCentral = std::move(pc);
             currCentral = std::move(cc);
         }
     }
 
+    // Вычисление гомографии точек ФОНА между соседними кадрами 
     cv::Mat Hnew;
     float cameraMotion = 0.0f;
     if (prevCentral.size() >= 6) {
         std::vector<uchar> centralMask;
-        int iterations = 2500;
+        int iterations = 2500;  // Лучше работает при большом кол-ве выбросов
+
+        // Адаптивный порог оценивания на выброс
+        // (чем сильнее движение камеры, тем больше порог)
         float reproj = ransacReprojThreshold * (1.0f + std::min(cameraMotion, 12.0f) * 0.12f);
         
+        // centralMask получает определения для точек 
+        // 1 = inlier (соответствует гомографии)
+        // 0 = outlier (выброс)
         Hnew = cv::findHomography(prevCentral, currCentral, cv::RANSAC,
                                   reproj, centralMask, iterations);
-    } else if (prevGood.size() >= 8) {
+        
+    } 
+    // Если в центрально зоне мало точек, то необходимо взять точки со всего кадра
+    else if (prevGood.size() >= 8) {
         std::vector<uchar> fallbackMask;
         Hnew = cv::findHomography(prevGood, currGood, cv::RANSAC,
                                 ransacReprojThreshold * 1.4f, fallbackMask);
         qDebug() << "[Tracker] мало точек в центре, H считается по всему кадру";
     }
 
-    std::vector<cv::Point2f> backgroundPts, objectPts;
-    std::vector<cv::Point2f> survivedCorners;
-    std::vector<uchar> survivedStatus;
-    std::vector<cv::Point2f> survivedAnchor;
 
-    // Полный варп предыдущего кадра - нужен и для HSV-теста тени (ниже, в
-    // цикле классификации), и для diff (шаг 3). Объявляем здесь, на уровне
-    // функции, чтобы не считать warpPerspective дважды.
+    // ПРОЕЦИРОВАНИЕ  (ВАРПИНГ)
+    std::vector<cv::Point2f> backgroundPts, objectPts;  // Результаты классификации
+    std::vector<cv::Point2f> survivedCorners;           // Точки для дальнейшего отслеживания
+    std::vector<uchar> survivedStatus;                  // Статус (фон/объект) для survivedCorners
+    std::vector<cv::Point2f> survivedAnchor;            // Якорные точки для дальнейшего отслеживания
+
     cv::Mat warpedPrevImg;
 
+    // Если была получена новая гомография
     if (!Hnew.empty()) {
+        
+        // Новая гомография становится текущей
         H = Hnew;
+        
+        // Вычисление величины движения камеры
         cameraMotion = cv::norm(H - cv::Mat::eye(3,3,CV_64F), cv::NORM_L2);
 
+        // Если был найден объект, передвигаем его обводку на смещение по гомографии 
         if (hasLastObject) {
             lastObjectBBox = warpBBox(lastObjectBBox, H, frame.size());
         }
 
+        // ---ПРОЕЦИРОВАНИЕ ИЗОБРАЖЕНИЯ--- (для детекции теней)
+        // Проецирование предыдущего кадра и предыдущих точек так, 
+        // чтобы они совпали с текущим кадром, так если бы все объекты на кадре
+        // двигались только из-за движения камеры
         cv::warpPerspective(prevFrame, warpedPrevImg, H, frame.size());
         cv::Mat warpedPrevHSV;
         cv::cvtColor(warpedPrevImg, warpedPrevHSV, cv::COLOR_BGR2HSV);
 
-        std::vector<cv::Point2f> warpedPrev; // это ТОЧКИ (не картинка) - имя как было
+        // ---ПРОЕЦИРОВАНИЕ ТОЧЕК-- (для классификации точек)
+        // Получение позиций точек в соответствие с предсказанием гомографии
+        std::vector<cv::Point2f> warpedPrev; 
         cv::perspectiveTransform(prevGood, warpedPrev, H);
 
+        // Адаптивные пороги ( для устранения выбросов)
+        // Адаптивный порог увеличивающийся с движением камеры
         float dynamicReprojThreshold = ransacReprojThreshold *
             (1.0f + std::min(cameraMotion, 15.0f) * 0.12f);
 
+        // Адаптивный порог уменьшается с радиальным движением камеры
         float currentRadialThresh = radialMotionThreshold;
         if (cameraMotion > 10.0f) currentRadialThresh = 0.48f;
 
+        // Основной цикл классификации точек
+        // currGood[i] — текущее положение точки
+        // warpedPrev[i] — предсказанное положение точки (если бы она была фоном)
+        // warpedAnchor[i] — предсказанное положение по якорю 
+        // frameHSV и warpedPrevHSV — для детекции теней.
         for (size_t i = 0; i < currGood.size(); i++) {
 
-            // ====================== ФИЛЬТР ТЕНЕЙ ======================
-            // Тень "приклеена" к движущемуся объекту и трекается вместе с
-            // ним, но физически не является ни фоном, ни объектом - не
-            // должна ни портить гомографию, ни раздувать bbox объекта.
-            // Сравниваем HSV текущего пикселя с HSV того же места на
-            // warpedPrev (это и есть наш "эталон, каким пиксель должен
-            // быть без независимого движения"): тень не меняет тон и
-            // насыщенность поверхности, только её яркость - и не до нуля.
+            // --- ФИЛЬТР ТЕНЕЙ ---
+            // Сравнение HSV текущего пикселя с HSV того же пикселя 
+            // на предсказанном положении (если бы она была фоном)
+            // Тень не меняет тон и насыщенность, только ее яркость
             if (isShadowPoint(currGood[i], frameHSV, warpedPrevHSV)) {
                 survivedCorners.push_back(currGood[i]);
-                survivedStatus.push_back(1); // трекаем дальше как фон, но не используем как улику
+                survivedStatus.push_back(1); // Классификация как фон
                 survivedAnchor.push_back(anchorGood[i]);
-                continue; // не в backgroundPts, не в objectPts
-            }
-            // ============================================================
-
+                continue; // Пропускаем дальнейшие шаги классификации
+            } 
+            
+            // Оценка ошибки репроекции
+            // Ошибка малая -> точка совпадает с предсказанием (Классифицировать как фон)
+            // Ошибка большая -> точка не совпадает с предсказанием (Классифицировать как объект)
             float err = static_cast<float>(cv::norm(currGood[i] - warpedPrev[i]));
             bool isBackground = err <= dynamicReprojThreshold;
 
-            // ====================== РАДИАЛЬНЫЙ БУСТ ======================
+            // Изменение масштаба кадра не должно рассчитываться как движение 
+            // При изменение масщтаба угол между вектором движения точки
+            // и вектором от центра к точке равен 180 если это фон
             if (isBackground && useRadialBoost && haveAnchorH && cameraMotion < radialBoostMaxCameraMotion) {
                 cv::Point2f motion = currGood[i] - warpedPrev[i];
                 cv::Point2f center(frame.cols/2.0f, frame.rows/2.0f);
@@ -304,7 +343,9 @@ void Tracker::getFrame(const cv::Mat frame){
                 if (motionLen > minRadialMotionLen && distToCenter > 30.0f) {
                     float radialness = std::abs(motion.dot(toCenter)) / 
                                       (motionLen * distToCenter + 1e-6f);
-
+                    
+                    // Даже если движение при зуме похоже на фон, но ошибка по якорю большая
+                    // (точка сильно сдвинулась за долгое время), то это все равно объект.            
                     float errLong = haveAnchorH ? 
                         static_cast<float>(cv::norm(currGood[i] - warpedAnchor[i])) : 0;
 
@@ -313,9 +354,8 @@ void Tracker::getFrame(const cv::Mat frame){
                     }
                 }
             }
-            // ============================================================
-
-            // Длинная база
+            
+            // Оценка ошибки репроекции относительно якорной точки 
             if (isBackground && haveAnchorH) {
                 float errLong = static_cast<float>(cv::norm(currGood[i] - warpedAnchor[i]));
                 if (errLong > anchorThresh)
@@ -323,6 +363,8 @@ void Tracker::getFrame(const cv::Mat frame){
             }
 
             // Защита от параллакса
+            // Если точка рядом с bbox объекта (в радиусе 45 пикселей) 
+            // и ошибка по якорю большая (>65% порога) -> точка помечается как объект.
             if (isBackground && hasLastObject && isNearLastObject(currGood[i], 45.0f)) {
                 float errLong = haveAnchorH ? 
                     static_cast<float>(cv::norm(currGood[i] - warpedAnchor[i])) : 0;
@@ -330,17 +372,21 @@ void Tracker::getFrame(const cv::Mat frame){
                     isBackground = false;
             }
 
-            // Краевые точки — фон
+            // Краевые точки — всегда фон
             if (!isInCentralZone(currGood[i], frame.size(), classificationZoneRatio))
                 isBackground = true;
 
+            // Добавление в нужную коллекцию точек по классификации
             if (isBackground) backgroundPts.push_back(currGood[i]);
             else               objectPts.push_back(currGood[i]);
 
+            // Добавление в трекаемые точки с классификацией
             survivedCorners.push_back(currGood[i]);
             survivedStatus.push_back(isBackground ? 1 : 0);
             survivedAnchor.push_back(anchorGood[i]);
         }
+    // Если новая гомография не найдена сохраняем точки и якоря для следующего кадра
+    // Все точки считаем фоном, продолжаем трекинг без классификации.
     } else {
         backgroundPts = currGood;
         survivedCorners = currGood;
@@ -349,24 +395,30 @@ void Tracker::getFrame(const cv::Mat frame){
     }
 
     // 3. Компенсация + diff
+    // Вычисление разницы между текущим и варпированым кадром
     cv::Mat diffFrame = cv::Mat::zeros(frame.size(), frame.type());
     cv::Mat shadowMask;
+    // Если была получена гомография и предыдущий кадр
     if (!H.empty() && !prevFrame.empty()) {
-        cv::Mat warpedPrev;
+        cv::Mat warpedPrev; // Спроецированный предыдущий кадр так, если бы было только движение камеры
         if (!warpedPrevImg.empty()) {
-            warpedPrev = warpedPrevImg; // уже посчитан выше для теста тени - не дублируем
+            warpedPrev = warpedPrevImg; // уже посчитан выше для места тени - не дублируем
         } else {
             cv::warpPerspective(prevFrame, warpedPrev, H, frame.size());
         }
+        // Вычисляем абсолютную разницу между текущим кадром и варпированным
         cv::absdiff(frame, warpedPrev, diffFrame);
 
+        // Вычисление валидноой маски(для поиска областей, которые не попадают в текущий кадр из предыдущего)
         cv::Mat validMask(prevFrame.size(), CV_8UC1, cv::Scalar(255));
+        // Применение гомографии к маске (все черные пиксели (нули) - области которых нет в текущем кадре)
         cv::warpPerspective(validMask, validMask, H, frame.size());
+        // Эрозия маски (убирание тонких белых областей, нужно чтобы убрать шум и артефакты на границах маски)
         cv::erode(validMask, validMask,
                   cv::getStructuringElement(cv::MORPH_ELLIPSE,
                       cv::Size(warpBorderErodePx, warpBorderErodePx)));
-        diffFrame.setTo(cv::Scalar::all(0), validMask == 0);
-
+        diffFrame.setTo(cv::Scalar::all(0), validMask == 0); // Приминение маски к difframe
+        // Вычисление маски теней и применение ее к difframe
         shadowMask = computeShadowMask(frame, warpedPrev);
         if (!shadowMask.empty()) {
             shadowMask.setTo(0, validMask == 0);
